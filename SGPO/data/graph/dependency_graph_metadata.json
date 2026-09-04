@@ -1,0 +1,42 @@
+{
+  "graph_name": "SGPO Stage-Oriented Strategy Invocation Graph",
+  "graph_version": "7.0",
+  "core_principle": "Strategies are invoked as stage-internal micro-strategies. A micro-strategy may only update local OptIR fields and pass local checks. Full code-level and semantic verification is executed after the stage is complete.",
+  "global_flow": [
+    "Spec",
+    "OptIR_Init",
+    "StageController",
+    "TilingStage",
+    "LayoutStage",
+    "MappingReorderingStage",
+    "VectorizationStage",
+    "PipelineStage",
+    "EpilogueStage",
+    "CompilerStage",
+    "FinalVerification",
+    "AcceptKernel"
+  ],
+  "execution_policy": {
+    "micro_strategy_invocation": {
+      "selection_unit": "one micro-strategy per subphase step",
+      "verification": "local_preconditions + local_postconditions only",
+      "code_generation": "optional local patch draft; full stage patch may be generated after stage plan is complete",
+      "rollback_scope": "subphase-level before stage patch is committed"
+    },
+    "stage_invocation": {
+      "selection_unit": "ordered stage plan",
+      "verification": "stage_completion_predicates + stage_post_verification",
+      "code_generation": "stage-level patch generation after required fields are complete",
+      "rollback_scope": "stage-level accepted code/OptIR checkpoint"
+    }
+  },
+  "stage_order": [
+    "Tiling",
+    "Layout",
+    "MappingReordering",
+    "Vectorization",
+    "Pipeline",
+    "Epilogue",
+    "Compiler"
+  ]
+}

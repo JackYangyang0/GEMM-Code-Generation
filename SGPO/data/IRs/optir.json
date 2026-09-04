@@ -1,0 +1,315 @@
+{
+  "optir_name": "GEMMOptIR",
+  "optir_version": "1.0",
+
+  "problem": {
+    "M": 512,
+    "N": 512,
+    "K": 512,
+
+    "operation": "C = A * B",
+
+    "dtype_A": "fp32",
+    "dtype_B": "fp32",
+    "dtype_C": "fp32",
+    "accum_dtype": "fp32",
+
+    "layout_A": "row_major",
+    "layout_B": "row_major",
+    "layout_C": "row_major",
+
+    "trans_A": false,
+    "trans_B": false,
+
+    "indexing_rule": {
+      "A": "A[m * K + k]",
+      "B": "B[k * N + n]",
+      "C": "C[m * N + n]"
+    },
+
+    "boundary_guard": {
+      "M": true,
+      "N": true,
+      "K": true
+    }
+  },
+
+  "hardware": {
+    "gpu_name": "NVIDIA GeForce RTX 4060 Ti",
+    "warp_size": 32,
+
+    "max_threads_per_block": 1024,
+    "max_shared_memory_per_block_bytes": 49152,
+    "memory_alignment_bytes": 16,
+
+    "supports_float4": true,
+    "supports_cp_async": false,
+    "supports_tensor_core": false
+  },
+
+  "tiling": {
+    "enabled": false,
+
+    "block_m": null,
+    "block_n": null,
+    "block_k": null,
+
+    "thread_m": 1,
+    "thread_n": 1,
+
+    "candidate_values": {
+      "block_m": [32, 64, 128],
+      "block_n": [32, 64, 128],
+      "block_k": [8, 16, 32],
+      "thread_m": [1, 2, 4],
+      "thread_n": [1, 2, 4]
+    }
+  },
+
+  "mapping": {
+    "grid_x": "ceil(N / block_n)",
+    "grid_y": "ceil(M / block_m)",
+
+    "block_dim_x": null,
+    "block_dim_y": null,
+    "block_dim_z": 1,
+
+    "threads_per_block": null,
+    "warps_per_block": null,
+
+    "thread_to_output": "one_or_multiple_C_elements",
+
+    "linear_thread_id": "threadIdx.y * blockDim.x + threadIdx.x"
+  },
+
+  "memory": {
+    "use_shared_memory": false,
+    "use_register_tile": false,
+
+    "shared_A": {
+      "enabled": false,
+      "shape": null,
+      "padding": 0
+    },
+
+    "shared_B": {
+      "enabled": false,
+      "shape": null,
+      "padding": 0
+    },
+
+    "global_load_A": {
+      "pattern": "scalar",
+      "coalesced": "unknown",
+      "boundary_guard": true
+    },
+
+    "global_load_B": {
+      "pattern": "scalar",
+      "coalesced": "unknown",
+      "boundary_guard": true
+    },
+
+    "global_store_C": {
+      "pattern": "scalar",
+      "coalesced": "unknown",
+      "boundary_guard": true
+    }
+  },
+
+  "vectorization": {
+    "enabled": false,
+
+    "A": {
+      "vectorized_load": false,
+      "vector_width": 1,
+      "vector_type": "float",
+      "alignment_required_bytes": 4,
+      "alignment_proven": false,
+      "alignment_guard": false,
+      "tail_handling": true
+    },
+
+    "B": {
+      "vectorized_load": false,
+      "vector_width": 1,
+      "vector_type": "float",
+      "alignment_required_bytes": 4,
+      "alignment_proven": false,
+      "alignment_guard": false,
+      "tail_handling": true
+    },
+
+    "C": {
+      "vectorized_store": false,
+      "vector_width": 1,
+      "vector_type": "float",
+      "alignment_required_bytes": 4,
+      "alignment_proven": false,
+      "alignment_guard": false,
+      "tail_handling": true
+    },
+
+    "legal_vector_widths": [1, 2, 4]
+  },
+
+  "strategy": {
+    "current_stage": "initial",
+
+    "stage_order": [
+      "Tiling",
+      "Layout",
+      "Reordering",
+      "Vectorization",
+      "Pipeline"
+    ],
+
+    "current_strategy_id": null,
+    "current_strategy_category": null,
+    "current_strategy_intent": null,
+
+    "preconditions": [],
+    "postconditions": [],
+    "affected_fields": [],
+    "risk_types": []
+  },
+
+  "patch": {
+    "patch_id": null,
+    "patch_type": null,
+
+    "ir_before_id": null,
+    "ir_after_id": null,
+
+    "changed_fields": [],
+
+    "code_diff_summary": null,
+    "expected_effect": null,
+    "observed_effect": null
+  },
+
+  "verification": {
+    "compile": {
+      "status": "unknown",
+      "error_message": null
+    },
+
+    "correctness": {
+      "status": "unknown",
+      "reference": "cpu_or_cublas",
+      "max_abs_error": null,
+      "max_rel_error": null,
+      "tolerance": 0.001
+    },
+
+    "runtime_safety": {
+      "status": "unknown",
+      "cuda_error": null,
+      "illegal_memory_access": false,
+      "misaligned_address": false,
+      "out_of_bounds": false
+    },
+
+    "strategy_compliance": {
+      "status": "unknown",
+      "postconditions_satisfied": null,
+      "missing_postconditions": []
+    },
+
+    "accepted": false,
+    "accept_reason": null
+  },
+
+  "performance": {
+    "latency_ms": null,
+    "gflops": null,
+
+    "relative_to_previous": null,
+    "relative_to_initial": null,
+    "relative_to_cublas": null,
+
+    "performance_regression": false,
+    "regression_ratio": null
+  },
+
+  "constraints": {
+    "hard_constraints": [
+      {
+        "id": "C_INDEX_ROW_MAJOR",
+        "description": "For row-major GEMM, A, B, and C indexes must follow A[m*K+k], B[k*N+n], C[m*N+n].",
+        "status": "unchecked",
+        "failure_type": "Semantic.IndexingError"
+      },
+      {
+        "id": "C_K_REDUCTION_COMPLETE",
+        "description": "All k values from 0 to K-1 must be accumulated exactly once.",
+        "status": "unchecked",
+        "failure_type": "Semantic.ReductionError"
+      },
+      {
+        "id": "C_THREADS_LIMIT",
+        "description": "threads_per_block must not exceed hardware.max_threads_per_block.",
+        "status": "unchecked",
+        "failure_type": "Resource.ThreadBlockOverflow"
+      },
+      {
+        "id": "C_SHARED_MEMORY_LIMIT",
+        "description": "Total shared memory usage must not exceed hardware.max_shared_memory_per_block_bytes.",
+        "status": "unchecked",
+        "failure_type": "Resource.SharedMemoryOverflow"
+      },
+      {
+        "id": "C_BOUNDARY_GUARD",
+        "description": "Global memory load and store must be guarded for boundary tiles.",
+        "status": "unchecked",
+        "failure_type": "Memory.OutOfBounds"
+      }
+    ],
+
+    "strategy_constraints": [
+      {
+        "id": "C_TILING_APPLIED",
+        "stage": "Tiling",
+        "description": "After tiling, block_m, block_n, and block_k must not be null.",
+        "status": "unchecked",
+        "failure_type": "StrategyCompliance.TilingNotApplied"
+      },
+      {
+        "id": "C_SHARED_MEMORY_APPLIED",
+        "stage": "Layout",
+        "description": "If shared memory optimization is selected, shared_A and shared_B must be enabled.",
+        "status": "unchecked",
+        "failure_type": "StrategyCompliance.SharedMemoryNotApplied"
+      },
+      {
+        "id": "C_VECTOR_ALIGNMENT",
+        "stage": "Vectorization",
+        "description": "If vector_width > 1, alignment_proven or alignment_guard must be true.",
+        "status": "unchecked",
+        "failure_type": "Vectorization.AlignmentViolation"
+      },
+      {
+        "id": "C_VECTOR_TAIL_HANDLING",
+        "stage": "Vectorization",
+        "description": "If M, N, or K is not divisible by vector_width, tail_handling must be true.",
+        "status": "unchecked",
+        "failure_type": "Vectorization.TailHandlingError"
+      }
+    ],
+
+    "soft_constraints": [
+      {
+        "id": "C_WARP_MULTIPLE",
+        "description": "threads_per_block should be a multiple of warp_size.",
+        "status": "unchecked",
+        "failure_type": "Performance.LowWarpUtilization"
+      },
+      {
+        "id": "C_REGISTER_PRESSURE",
+        "description": "thread_m * thread_n should not be too large to avoid high register pressure.",
+        "status": "unchecked",
+        "failure_type": "Performance.RegisterPressure"
+      }
+    ]
+  }
+}

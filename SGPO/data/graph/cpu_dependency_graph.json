@@ -1,0 +1,168 @@
+{
+  "graph_name": "SGPO CPU C Dependency Graph",
+  "graph_version": "3.2-openblas-style-cpu-gemm-throughput-boundary-relaxed",
+  "target": {
+    "backend": "cpu",
+    "language": "c"
+  },
+  "stage_order": [
+    "CPUTiling",
+    "CPUPacking",
+    "CPUMicroKernel",
+    "CPUVectorization",
+    "CPULoopSchedule",
+    "CPUParallelization",
+    "CPUCompiler",
+    "CPUEpilogue"
+  ],
+  "edges": [
+    [
+      "CPUTiling",
+      "CPUPacking"
+    ],
+    [
+      "CPUPacking",
+      "CPUMicroKernel"
+    ],
+    [
+      "CPUMicroKernel",
+      "CPUVectorization"
+    ],
+    [
+      "CPUVectorization",
+      "CPULoopSchedule"
+    ],
+    [
+      "CPULoopSchedule",
+      "CPUParallelization"
+    ],
+    [
+      "CPUParallelization",
+      "CPUCompiler"
+    ],
+    [
+      "CPUCompiler",
+      "CPUEpilogue"
+    ]
+  ],
+  "subphase_edges": [
+    [
+      "CPUTiling.L2BlockSelection",
+      "CPUTiling.L1BlockSelection"
+    ],
+    [
+      "CPUTiling.L1BlockSelection",
+      "CPUTiling.RegisterBlockSelection"
+    ],
+    [
+      "CPUTiling.RegisterBlockSelection",
+      "CPUTiling.StageVerification"
+    ],
+    [
+      "CPUPacking.PrefetchPolicy",
+      "CPUPacking.StageVerification"
+    ],
+    [
+      "CPUMicroKernel.KernelShapeSelection",
+      "CPUMicroKernel.StageVerification"
+    ],
+    [
+      "CPUVectorization.SIMDPolicy",
+      "CPUVectorization.StageVerification"
+    ],
+    [
+      "CPULoopSchedule.UnrollSelection",
+      "CPULoopSchedule.StageVerification"
+    ],
+    [
+      "CPUParallelization.ThreadPolicy",
+      "CPUParallelization.StageVerification"
+    ],
+    [
+      "CPUCompiler.FlagPolicy",
+      "CPUCompiler.StageVerification"
+    ],
+    [
+      "CPUEpilogue.StorePolicy",
+      "CPUEpilogue.StageVerification"
+    ],
+    [
+      "CPUPacking.PanelPackingPolicy",
+      "CPUPacking.PackBufferOwnership"
+    ],
+    [
+      "CPUPacking.PackBufferOwnership",
+      "CPUPacking.PrefetchPolicy"
+    ],
+    [
+      "CPULoopSchedule.MacroKernelDriverSelection",
+      "CPULoopSchedule.LoopOrderSelection"
+    ],
+    [
+      "CPULoopSchedule.LoopOrderSelection",
+      "CPULoopSchedule.UnrollSelection"
+    ]
+  ],
+  "strategy_dependency_notes": [
+    "Packing must be selected before SIMD micro-kernel construction.",
+    "Micro-kernel shape determines which vectorization policy is legal.",
+    "OpenMP strategies should be paired with CPU.Compiler.NativeO3OpenMP or CPU.Compiler.MSVC.AVX2OpenMP.",
+    "Compiler flags are explicit strategies so generated code and verifier use matching assumptions.",
+    "OpenMP packed-panel code must use thread-private or tile-private buffers before any parallel tile schedule is selected.",
+    "Intel SIMD micro-kernels must use N-lane accumulator vectors: broadcast A scalar, load contiguous B panel/N columns, and reduce K sequentially.",
+    "OpenBLASPanelMajor is a portable structural strategy inspired by OpenBLAS/QiMeng drivers; ISA-specific compute remains backend-specific.",
+    "Throughput CPU paths may relax inner full-tile boundary checks only when CPU.TailKernel.FullTileFastPathScalarCleanup is present.",
+    "CPU.MacroKernel.OpenBLASStyle.PanelDriver must appear before OpenBLASPanelMajor loop scheduling.",
+    "PackA/PackB implementation strategies are separate from selecting packed-memory flags; code generation must emit real copy loops."
+  ],
+  "requires": {
+    "CPU.MacroKernel.OpenBLASStyle.PanelDriver": [
+      {
+        "mode": "all",
+        "strategies": [
+          "CPU.Memory.PackBuffer.ThreadPrivate"
+        ],
+        "required_state": {
+          "cpu_memory.pack_b": true
+        }
+      }
+    ],
+    "CPU.LoopOrder.OpenBLASPanelMajor": [
+      {
+        "mode": "all",
+        "strategies": [
+          "CPU.MacroKernel.OpenBLASStyle.PanelDriver"
+        ]
+      }
+    ],
+    "CPU.TailKernel.FullTileFastPathScalarCleanup": [
+      {
+        "mode": "all",
+        "strategies": [
+          "CPU.Vectorization.AVX2.FMA.Explicit"
+        ],
+        "required_state": {
+          "cpu_vectorization.tail_handling": true
+        }
+      }
+    ]
+  },
+  "fallback": {
+    "CPU.MicroKernel.AVX512.FMA.8x16": [
+      {
+        "strategies": [
+          "CPU.MicroKernel.AVX2.FMA.4x8",
+          "CPU.MicroKernel.Scalar.4x4"
+        ]
+      }
+    ],
+    "CPU.Packing.PackAB.MRxKC_KCxNR": [
+      {
+        "strategies": [
+          "CPU.Memory.PackB.ContiguousPanel",
+          "CPU.Memory.NoPack"
+        ]
+      }
+    ]
+  }
+}

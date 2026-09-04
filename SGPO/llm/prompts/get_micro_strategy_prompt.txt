@@ -1,0 +1,45 @@
+You are selecting micro-strategy labels for the current GEMM construction subphase.
+
+Current stage:
+{current_stage}
+
+Current subphase:
+{current_subphase}
+
+Subphase purpose:
+{subphase_purpose}
+
+Required fields:
+{requires_fields}
+
+Provided fields:
+{provides_fields}
+
+Current OptIR summary:
+{optir_summary}
+
+Allowed strategy ids:
+{allowed_strategy_ids}
+
+Rules:
+- Select up to 3 strategy_id values from allowed_strategy_ids. If at least 3 viable alternatives exist, return exactly 3.
+- Order candidates from most promising to least promising and assign confidence scores.
+- Each selected strategy_id will become a separate search path.
+- Do not select strategies from other subphases.
+- Do not generate code.
+- Do not perform full post verification.
+- This micro-strategy only provides local OptIR fields.
+- Deferred checks must wait until stage verification.
+
+Return valid JSON only:
+{{
+  "candidates": [
+    {{
+      "strategy_id": "string",
+      "reason": "string",
+      "confidence": 0.0
+    }}
+  ],
+  "reason": "string",
+  "expected_ir_updates": {{}}
+}}

@@ -1,0 +1,1044 @@
+{
+  "index_name": "SGPO CPU C Strategy Index",
+  "index_version": "3.2-openblas-style-cpu-gemm-throughput-boundary-relaxed",
+  "target": {
+    "backend": "cpu",
+    "language": "c",
+    "default_profile": "cpu_throughput",
+    "default_stage_order": [
+      "CPUTiling",
+      "CPUPacking",
+      "CPUMicroKernel",
+      "CPUVectorization",
+      "CPULoopSchedule",
+      "CPUParallelization",
+      "CPUCompiler",
+      "CPUEpilogue"
+    ]
+  },
+  "stage_order": [
+    "CPUTiling",
+    "CPUPacking",
+    "CPUMicroKernel",
+    "CPUVectorization",
+    "CPULoopSchedule",
+    "CPUParallelization",
+    "CPUCompiler",
+    "CPUEpilogue"
+  ],
+  "global_selection_rules": [
+    "Use this index only when target.backend = cpu.",
+    "Generate ordinary C code only; CUDA strategies are forbidden.",
+    "CPU GEMM construction order is tiling -> packing -> micro-kernel -> vectorization -> loop schedule -> parallelization -> compiler flags -> epilogue.",
+    "Explicit SIMD/FMA micro-kernels require scalar tail handling and a scalar fallback path.",
+    "Packed A/B panels must preserve row-major NN GEMM semantics.",
+    "Explicit CPU SIMD lanes must map to contiguous N outputs; A is scalar-broadcast and K is reduced sequentially.",
+    "OpenMP plus packed panels requires thread-private or tile-private A/B packing buffers.",
+    "Packed B panel layout must be consumed consistently as K-major panel data for row-major NN GEMM.",
+    "After correctness passes, throughput_exploration may emit full-tile fast paths, but must keep scalar cleanup for M/N/K tails.",
+    "OpenBLAS-style CPU code must materialize macro-kernel, pack kernels, micro-kernel, and epilogue as a closed dataflow.",
+    "SIMD full-tile fast path may remove inner boundary checks only when scalar cleanup covers residual rows, columns, and K tails."
+  ],
+  "stages": {
+    "CPUTiling": {
+      "description": "Choose L2, L1, and register tile sizes for CPU GEMM.",
+      "subphases": [
+        {
+          "subphase_id": "CPUTiling.L2BlockSelection",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose outer M/N/K tile whose A/B/C working set fits the L2 cache budget.",
+          "allowed_strategy_patterns": [
+            "CPU.Tiling.L2Block.*"
+          ],
+          "allowed_strategy_ids": [
+            "CPU.Tiling.L2Block.128x128x128",
+            "CPU.Tiling.L2Block.192x128x128",
+            "CPU.Tiling.L2Block.256x128x128"
+          ],
+          "requires_fields": [
+            "problem.M",
+            "problem.N",
+            "problem.K",
+            "hardware.cpu_cache.l2_cache_bytes"
+          ],
+          "provides_fields": [
+            "cpu_tiling.l2_block_m",
+            "cpu_tiling.l2_block_n",
+            "cpu_tiling.l2_block_k",
+            "cpu_resource.l2_working_set_bytes"
+          ],
+          "local_checks": [
+            "cpu_tiling.l2_block_m != null",
+            "cpu_tiling.l2_block_n != null",
+            "cpu_tiling.l2_block_k != null",
+            {
+              "id": "CPU_L2_WORKING_SET_FITS",
+              "op": "le",
+              "lhs": "cpu_resource.l2_working_set_bytes",
+              "rhs_field": "cpu_resource.l2_budget_bytes"
+            }
+          ],
+          "next_subphase": "CPUTiling.L1BlockSelection"
+        },
+        {
+          "subphase_id": "CPUTiling.L1BlockSelection",
+          "order": 2,
+          "optional": false,
+          "purpose": "Choose inner tile whose A/B/C live working set fits the L1 data cache budget.",
+          "allowed_strategy_patterns": [
+            "CPU.Tiling.L1Block.*"
+          ],
+          "allowed_strategy_ids": [
+            "CPU.Tiling.L1Block.16x32x64",
+            "CPU.Tiling.L1Block.32x32x64",
+            "CPU.Tiling.L1Block.32x64x64"
+          ],
+          "requires_fields": [
+            "cpu_tiling.l2_block_m",
+            "cpu_tiling.l2_block_n",
+            "cpu_tiling.l2_block_k",
+            "hardware.cpu_cache.l1_data_cache_bytes"
+          ],
+          "provides_fields": [
+            "cpu_tiling.l1_block_m",
+            "cpu_tiling.l1_block_n",
+            "cpu_tiling.l1_block_k",
+            "cpu_resource.l1_working_set_bytes"
+          ],
+          "local_checks": [
+            "cpu_tiling.l1_block_m != null",
+            "cpu_tiling.l1_block_n != null",
+            "cpu_tiling.l1_block_k != null",
+            {
+              "id": "CPU_L1_WORKING_SET_FITS",
+              "op": "le",
+              "lhs": "cpu_resource.l1_working_set_bytes",
+              "rhs_field": "cpu_resource.l1_budget_bytes"
+            }
+          ],
+          "next_subphase": "CPUTiling.RegisterBlockSelection"
+        },
+        {
+          "subphase_id": "CPUTiling.RegisterBlockSelection",
+          "order": 3,
+          "optional": false,
+          "purpose": "Choose scalar/register accumulator tile shape.",
+          "allowed_strategy_ids": [
+            "CPU.Tiling.RegisterBlock.2x4",
+            "CPU.Tiling.RegisterBlock.4x4",
+            "CPU.Tiling.RegisterBlock.4x8"
+          ],
+          "requires_fields": [
+            "cpu_tiling.l1_block_m",
+            "cpu_tiling.l1_block_n"
+          ],
+          "provides_fields": [
+            "cpu_tiling.register_m",
+            "cpu_tiling.register_n",
+            "cpu_resource.register_accumulator_count"
+          ],
+          "local_checks": [
+            "cpu_tiling.register_m != null",
+            "cpu_tiling.register_n != null",
+            {
+              "id": "CPU_REGISTER_BLOCK_REASONABLE",
+              "op": "le",
+              "lhs": "cpu_resource.register_accumulator_count",
+              "rhs_value": 32
+            }
+          ],
+          "next_subphase": "CPUTiling.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "CPUTiling.StageVerification",
+        "required_fields": [
+          "cpu_tiling.l2_block_m",
+          "cpu_tiling.l2_block_n",
+          "cpu_tiling.l2_block_k",
+          "cpu_tiling.l1_block_m",
+          "cpu_tiling.l1_block_n",
+          "cpu_tiling.l1_block_k",
+          "cpu_tiling.register_m",
+          "cpu_tiling.register_n",
+          "cpu_resource.l2_working_set_bytes",
+          "cpu_resource.l1_working_set_bytes"
+        ],
+        "predicates": [
+          {
+            "id": "CPU_L2_WORKING_SET_FITS",
+            "op": "le",
+            "lhs": "cpu_resource.l2_working_set_bytes",
+            "rhs_field": "cpu_resource.l2_budget_bytes"
+          },
+          {
+            "id": "CPU_L1_WORKING_SET_FITS",
+            "op": "le",
+            "lhs": "cpu_resource.l1_working_set_bytes",
+            "rhs_field": "cpu_resource.l1_budget_bytes"
+          },
+          {
+            "id": "CPU_REGISTER_BLOCK_REASONABLE",
+            "op": "le",
+            "lhs": "cpu_resource.register_accumulator_count",
+            "rhs_value": 32
+          }
+        ]
+      },
+      "stage_id": "CPUTiling",
+      "subphase_order": [
+        "CPUTiling.L2BlockSelection",
+        "CPUTiling.L1BlockSelection",
+        "CPUTiling.RegisterBlockSelection",
+        "CPUTiling.StageVerification"
+      ]
+    },
+    "CPUPacking": {
+      "description": "Choose A/B packing and optional prefetch policy before micro-kernel construction.",
+      "subphases": [
+        {
+          "subphase_id": "CPUPacking.PanelPackingPolicy",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose matrix panel packing layout for contiguous micro-kernel operands.",
+          "allowed_strategy_ids": [
+            "CPU.Memory.NoPack",
+            "CPU.Memory.PackB.ContiguousPanel",
+            "CPU.Memory.PackA.ContiguousPanel",
+            "CPU.Memory.PackAB.PanelMajor",
+            "CPU.Packing.PackA.MRxKC",
+            "CPU.Packing.PackB.KCxNR",
+            "CPU.Packing.PackAB.MRxKC_KCxNR"
+          ],
+          "requires_fields": [
+            "cpu_tiling.l1_block_k",
+            "cpu_tiling.l1_block_n"
+          ],
+          "provides_fields": [
+            "cpu_memory.pack_a",
+            "cpu_memory.pack_b",
+            "cpu_memory.pack_layout"
+          ],
+          "local_checks": [
+            "cpu_memory.pack_a != null",
+            "cpu_memory.pack_b != null",
+            "cpu_memory.pack_layout != null"
+          ],
+          "next_subphase": "CPUPacking.PackBufferOwnership"
+        },
+        {
+          "subphase_id": "CPUPacking.PackBufferOwnership",
+          "order": 2,
+          "optional": false,
+          "purpose": "Choose packed panel buffer ownership so parallel workers cannot race on shared packing storage.",
+          "allowed_strategy_ids": [
+            "CPU.Memory.PackBuffer.ThreadPrivate",
+            "CPU.Memory.PackBuffer.TilePrivate"
+          ],
+          "requires_fields": [
+            "cpu_memory.pack_a",
+            "cpu_memory.pack_b"
+          ],
+          "provides_fields": [
+            "cpu_memory.pack_buffer_scope"
+          ],
+          "local_checks": [
+            "cpu_memory.pack_buffer_scope != null"
+          ],
+          "next_subphase": "CPUPacking.PrefetchPolicy"
+        },
+        {
+          "subphase_id": "CPUPacking.PrefetchPolicy",
+          "order": 3,
+          "optional": true,
+          "purpose": "Choose optional software prefetch policy.",
+          "allowed_strategy_ids": [
+            "CPU.Memory.Prefetch.Disabled",
+            "CPU.Memory.Prefetch.BPanel",
+            "CPU.Memory.Prefetch.ABPanel"
+          ],
+          "requires_fields": [
+            "cpu_memory.pack_buffer_scope"
+          ],
+          "provides_fields": [
+            "cpu_memory.prefetch"
+          ],
+          "local_checks": [
+            "cpu_memory.prefetch != null"
+          ],
+          "next_subphase": "CPUPacking.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "CPUPacking.StageVerification",
+        "required_fields": [
+          "cpu_memory.pack_a",
+          "cpu_memory.pack_b",
+          "cpu_memory.pack_layout",
+          "cpu_memory.pack_buffer_scope"
+        ],
+        "predicates": [
+          "cpu_memory.pack_a != null",
+          "cpu_memory.pack_b != null",
+          "cpu_memory.pack_layout != null",
+          "cpu_memory.pack_buffer_scope != null"
+        ]
+      },
+      "stage_id": "CPUPacking",
+      "subphase_order": [
+        "CPUPacking.PanelPackingPolicy",
+        "CPUPacking.PackBufferOwnership",
+        "CPUPacking.PrefetchPolicy",
+        "CPUPacking.StageVerification"
+      ]
+    },
+    "CPUMicroKernel": {
+      "description": "Choose scalar or SIMD micro-kernel shape that consumes packed/tiled operands.",
+      "subphases": [
+        {
+          "subphase_id": "CPUMicroKernel.KernelShapeSelection",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose the inner GEMM micro-kernel shape and implementation family.",
+          "allowed_strategy_ids": [
+            "CPU.MicroKernel.Scalar.4x4",
+            "CPU.MicroKernel.AVX2.FMA.4x8",
+            "CPU.MicroKernel.AVX2.FMA.6x16",
+            "CPU.MicroKernel.AVX512.FMA.8x16",
+            "CPU.MicroKernel.AVX2.FMA.4x16"
+          ],
+          "requires_fields": [
+            "cpu_tiling.register_m",
+            "cpu_tiling.register_n",
+            "cpu_memory.pack_b",
+            "cpu_memory.pack_buffer_scope"
+          ],
+          "provides_fields": [
+            "cpu_microkernel.family",
+            "cpu_microkernel.mr",
+            "cpu_microkernel.nr",
+            "cpu_microkernel.uses_intrinsics"
+          ],
+          "local_checks": [
+            "cpu_microkernel.family != null",
+            "cpu_microkernel.mr != null",
+            "cpu_microkernel.nr != null",
+            "cpu_microkernel.simd_lane_mapping != null",
+            "cpu_microkernel.a_operand_policy != null",
+            "cpu_microkernel.k_reduction_policy != null"
+          ],
+          "next_subphase": "CPUMicroKernel.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "CPUMicroKernel.StageVerification",
+        "required_fields": [
+          "cpu_microkernel.family",
+          "cpu_microkernel.mr",
+          "cpu_microkernel.nr",
+          "cpu_microkernel.simd_lane_mapping",
+          "cpu_microkernel.a_operand_policy",
+          "cpu_microkernel.k_reduction_policy"
+        ],
+        "predicates": [
+          "cpu_microkernel.family != null",
+          "cpu_microkernel.mr != null",
+          "cpu_microkernel.nr != null",
+          "cpu_microkernel.simd_lane_mapping != null",
+          "cpu_microkernel.a_operand_policy != null",
+          "cpu_microkernel.k_reduction_policy != null"
+        ]
+      },
+      "stage_id": "CPUMicroKernel",
+      "subphase_order": [
+        "CPUMicroKernel.KernelShapeSelection",
+        "CPUMicroKernel.StageVerification"
+      ]
+    },
+    "CPUVectorization": {
+      "description": "Choose SIMD policy and tail handling.",
+      "subphases": [
+        {
+          "subphase_id": "CPUVectorization.SIMDPolicy",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose portable, explicit AVX2/FMA, or AVX512/FMA vectorization policy.",
+          "allowed_strategy_ids": [
+            "CPU.Vectorization.CompilerAutoSIMD",
+            "CPU.Vectorization.PragmaSIMD",
+            "CPU.Vectorization.AVX2.FMA.Explicit",
+            "CPU.Vectorization.AVX512.FMA.Explicit",
+            "CPU.Vectorization.ScalarPortable"
+          ],
+          "requires_fields": [
+            "cpu_microkernel.family"
+          ],
+          "provides_fields": [
+            "cpu_vectorization.policy",
+            "cpu_vectorization.isa",
+            "cpu_vectorization.tail_handling"
+          ],
+          "local_checks": [
+            "cpu_vectorization.policy != null",
+            "cpu_vectorization.tail_handling = True",
+            "cpu_vectorization.lane_mapping = n_contiguous",
+            "cpu_vectorization.a_load_policy = scalar_broadcast"
+          ],
+          "next_subphase": "CPUVectorization.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "CPUVectorization.StageVerification",
+        "required_fields": [
+          "cpu_vectorization.policy",
+          "cpu_vectorization.tail_handling",
+          "cpu_vectorization.lane_mapping",
+          "cpu_vectorization.a_load_policy"
+        ],
+        "predicates": [
+          "cpu_vectorization.policy != null",
+          "cpu_vectorization.tail_handling = True",
+          "cpu_vectorization.lane_mapping = n_contiguous",
+          "cpu_vectorization.a_load_policy = scalar_broadcast"
+        ]
+      },
+      "stage_id": "CPUVectorization",
+      "subphase_order": [
+        "CPUVectorization.SIMDPolicy",
+        "CPUVectorization.StageVerification"
+      ]
+    },
+    "CPULoopSchedule": {
+      "description": "Choose loop order and K-loop unroll after packing/micro-kernel are known.",
+      "subphases": [
+        {
+          "subphase_id": "CPULoopSchedule.MacroKernelDriverSelection",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose a macro-kernel driver that connects panel loops, packing, and micro-kernel calls.",
+          "allowed_strategy_ids": [
+            "CPU.MacroKernel.OpenBLASStyle.PanelDriver",
+            "CPU.MacroKernel.DirectTiled.Driver"
+          ],
+          "requires_fields": [
+            "cpu_tiling.l2_block_m",
+            "cpu_tiling.l2_block_n",
+            "cpu_tiling.l2_block_k",
+            "cpu_memory.pack_b",
+            "cpu_microkernel.family"
+          ],
+          "provides_fields": [
+            "cpu_macro_kernel.driver",
+            "cpu_macro_kernel.calls_microkernel_grid"
+          ],
+          "local_checks": [
+            "cpu_macro_kernel.driver != null",
+            "cpu_macro_kernel.calls_microkernel_grid = True"
+          ],
+          "next_subphase": "CPULoopSchedule.LoopOrderSelection"
+        },
+        {
+          "subphase_id": "CPULoopSchedule.LoopOrderSelection",
+          "order": 2,
+          "optional": false,
+          "purpose": "Choose macro-kernel loop order around packed panels and micro-kernel calls.",
+          "allowed_strategy_ids": [
+            "CPU.LoopOrder.IKJ",
+            "CPU.LoopOrder.IJK",
+            "CPU.LoopOrder.TiledIJK",
+            "CPU.LoopOrder.PackedPanelMajor",
+            "CPU.LoopOrder.OpenBLASPanelMajor"
+          ],
+          "requires_fields": [
+            "cpu_macro_kernel.driver",
+            "cpu_macro_kernel.calls_microkernel_grid = True"
+          ],
+          "provides_fields": [
+            "cpu_schedule.loop_order"
+          ],
+          "local_checks": [
+            "cpu_schedule.loop_order != null"
+          ],
+          "next_subphase": "CPULoopSchedule.UnrollSelection"
+        },
+        {
+          "subphase_id": "CPULoopSchedule.UnrollSelection",
+          "order": 3,
+          "optional": false,
+          "purpose": "Choose K-loop unroll factor compatible with the micro-kernel.",
+          "allowed_strategy_ids": [
+            "CPU.KLoop.Unroll4",
+            "CPU.KLoop.Unroll8",
+            "CPU.KLoop.NoUnroll"
+          ],
+          "requires_fields": [
+            "cpu_schedule.loop_order"
+          ],
+          "provides_fields": [
+            "cpu_schedule.k_unroll"
+          ],
+          "local_checks": [
+            "cpu_schedule.k_unroll != null"
+          ],
+          "next_subphase": "CPULoopSchedule.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "CPULoopSchedule.StageVerification",
+        "required_fields": [
+          "cpu_schedule.loop_order",
+          "cpu_schedule.k_unroll",
+          "cpu_macro_kernel.driver",
+          "cpu_macro_kernel.calls_microkernel_grid"
+        ],
+        "predicates": [
+          "cpu_schedule.loop_order != null",
+          "cpu_schedule.k_unroll != null",
+          "cpu_macro_kernel.driver != null",
+          "cpu_macro_kernel.calls_microkernel_grid = True"
+        ]
+      },
+      "stage_id": "CPULoopSchedule",
+      "subphase_order": [
+        "CPULoopSchedule.MacroKernelDriverSelection",
+        "CPULoopSchedule.LoopOrderSelection",
+        "CPULoopSchedule.UnrollSelection",
+        "CPULoopSchedule.StageVerification"
+      ]
+    },
+    "CPUParallelization": {
+      "description": "Choose CPU thread partitioning policy.",
+      "subphases": [
+        {
+          "subphase_id": "CPUParallelization.ThreadPolicy",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose host-side thread policy over independent C tiles.",
+          "allowed_strategy_ids": [
+            "CPU.Parallel.Serial",
+            "CPU.Parallel.OpenMP.RowBlock",
+            "CPU.Parallel.OpenMP.Collapse2",
+            "CPU.Threading.OpenMP.TilePartition"
+          ],
+          "requires_fields": [
+            "cpu_tiling.l2_block_m",
+            "cpu_schedule.loop_order"
+          ],
+          "provides_fields": [
+            "cpu_parallel.policy"
+          ],
+          "local_checks": [
+            "cpu_parallel.policy != null"
+          ],
+          "next_subphase": "CPUParallelization.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "CPUParallelization.StageVerification",
+        "required_fields": [
+          "cpu_parallel.policy"
+        ],
+        "predicates": [
+          "cpu_parallel.policy != null"
+        ]
+      },
+      "stage_id": "CPUParallelization",
+      "subphase_order": [
+        "CPUParallelization.ThreadPolicy",
+        "CPUParallelization.StageVerification"
+      ]
+    },
+    "CPUCompiler": {
+      "description": "Choose compiler optimization flags required by the selected CPU implementation.",
+      "subphases": [
+        {
+          "subphase_id": "CPUCompiler.FlagPolicy",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose compiler flags for native CPU code generation and OpenMP/SIMD support.",
+          "allowed_strategy_ids": [
+            "CPU.Compiler.PortableO2",
+            "CPU.Compiler.NativeO3",
+            "CPU.Compiler.NativeO3OpenMP",
+            "CPU.Compiler.MSVC.AVX2OpenMP",
+            "CPU.Compiler.NativeO3FastMathOpenMP"
+          ],
+          "requires_fields": [
+            "cpu_parallel.policy",
+            "cpu_vectorization.policy"
+          ],
+          "provides_fields": [
+            "cpu_compiler.optimization_level",
+            "cpu_compiler.native_arch",
+            "cpu_compiler.openmp",
+            "cpu_compiler.vector_isa",
+            "cpu_compiler.fast_math",
+            "cpu_compiler.unroll_loops"
+          ],
+          "local_checks": [
+            "cpu_compiler.optimization_level != null",
+            "cpu_compiler.openmp != null"
+          ],
+          "next_subphase": "CPUCompiler.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "CPUCompiler.StageVerification",
+        "required_fields": [
+          "cpu_compiler.optimization_level",
+          "cpu_compiler.openmp"
+        ],
+        "predicates": [
+          "cpu_compiler.optimization_level != null",
+          "cpu_compiler.openmp != null"
+        ]
+      },
+      "stage_id": "CPUCompiler",
+      "subphase_order": [
+        "CPUCompiler.FlagPolicy",
+        "CPUCompiler.StageVerification"
+      ]
+    },
+    "CPUEpilogue": {
+      "description": "Finalize CPU C store semantics.",
+      "subphases": [
+        {
+          "subphase_id": "CPUEpilogue.StorePolicy",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose CPU C store policy.",
+          "allowed_strategy_ids": [
+            "CPU.Epilogue.Store.AlphaBeta",
+            "CPU.Epilogue.Store.BetaZeroFastPath",
+            "CPU.TailKernel.FullTileFastPathScalarCleanup"
+          ],
+          "requires_fields": [
+            "cpu_schedule.loop_order",
+            "cpu_vectorization.tail_handling = True"
+          ],
+          "provides_fields": [
+            "cpu_epilogue.store_policy",
+            "cpu_tail.full_tile_fast_path",
+            "cpu_tail.scalar_cleanup"
+          ],
+          "local_checks": [
+            "cpu_epilogue.store_policy != null",
+            "cpu_tail.scalar_cleanup = True"
+          ],
+          "next_subphase": "CPUEpilogue.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "CPUEpilogue.StageVerification",
+        "required_fields": [
+          "cpu_epilogue.store_policy"
+        ],
+        "predicates": [
+          "cpu_epilogue.store_policy != null"
+        ]
+      },
+      "stage_id": "CPUEpilogue",
+      "subphase_order": [
+        "CPUEpilogue.StorePolicy",
+        "CPUEpilogue.StageVerification"
+      ]
+    }
+  },
+  "strategies": [
+    {
+      "strategy_id": "CPU.Tiling.L2Block.128x128x128",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.L2BlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Tiling.L2Block.192x128x128",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.L2BlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Tiling.L2Block.256x128x128",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.L2BlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Tiling.L1Block.16x32x64",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.L1BlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Tiling.L1Block.32x32x64",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.L1BlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Tiling.L1Block.32x64x64",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.L1BlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Tiling.RegisterBlock.2x4",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.RegisterBlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Tiling.RegisterBlock.4x4",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.RegisterBlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Tiling.RegisterBlock.4x8",
+      "stage": "CPUTiling",
+      "category": "CPUTiling",
+      "subphase": "CPUTiling.RegisterBlockSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.NoPack",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PanelPackingPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.PackB.ContiguousPanel",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PanelPackingPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.PackA.ContiguousPanel",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PanelPackingPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.PackAB.PanelMajor",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PanelPackingPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.Prefetch.Disabled",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PrefetchPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.Prefetch.BPanel",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PrefetchPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.Prefetch.ABPanel",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PrefetchPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.MicroKernel.Scalar.4x4",
+      "stage": "CPUMicroKernel",
+      "category": "CPUMicroKernel",
+      "subphase": "CPUMicroKernel.KernelShapeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.MicroKernel.AVX2.FMA.4x8",
+      "stage": "CPUMicroKernel",
+      "category": "CPUMicroKernel",
+      "subphase": "CPUMicroKernel.KernelShapeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.MicroKernel.AVX2.FMA.6x16",
+      "stage": "CPUMicroKernel",
+      "category": "CPUMicroKernel",
+      "subphase": "CPUMicroKernel.KernelShapeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.MicroKernel.AVX512.FMA.8x16",
+      "stage": "CPUMicroKernel",
+      "category": "CPUMicroKernel",
+      "subphase": "CPUMicroKernel.KernelShapeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Vectorization.CompilerAutoSIMD",
+      "stage": "CPUVectorization",
+      "category": "CPUVectorization",
+      "subphase": "CPUVectorization.SIMDPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Vectorization.PragmaSIMD",
+      "stage": "CPUVectorization",
+      "category": "CPUVectorization",
+      "subphase": "CPUVectorization.SIMDPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Vectorization.AVX2.FMA.Explicit",
+      "stage": "CPUVectorization",
+      "category": "CPUVectorization",
+      "subphase": "CPUVectorization.SIMDPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Vectorization.AVX512.FMA.Explicit",
+      "stage": "CPUVectorization",
+      "category": "CPUVectorization",
+      "subphase": "CPUVectorization.SIMDPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Vectorization.ScalarPortable",
+      "stage": "CPUVectorization",
+      "category": "CPUVectorization",
+      "subphase": "CPUVectorization.SIMDPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.LoopOrder.IKJ",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.LoopOrderSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.LoopOrder.IJK",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.LoopOrderSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.LoopOrder.TiledIJK",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.LoopOrderSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.LoopOrder.PackedPanelMajor",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.LoopOrderSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.KLoop.Unroll4",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.UnrollSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.KLoop.Unroll8",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.UnrollSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.KLoop.NoUnroll",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.UnrollSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Parallel.Serial",
+      "stage": "CPUParallelization",
+      "category": "CPUParallelization",
+      "subphase": "CPUParallelization.ThreadPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Parallel.OpenMP.RowBlock",
+      "stage": "CPUParallelization",
+      "category": "CPUParallelization",
+      "subphase": "CPUParallelization.ThreadPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Parallel.OpenMP.Collapse2",
+      "stage": "CPUParallelization",
+      "category": "CPUParallelization",
+      "subphase": "CPUParallelization.ThreadPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Threading.OpenMP.TilePartition",
+      "stage": "CPUParallelization",
+      "category": "CPUParallelization",
+      "subphase": "CPUParallelization.ThreadPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Compiler.PortableO2",
+      "stage": "CPUCompiler",
+      "category": "CPUCompiler",
+      "subphase": "CPUCompiler.FlagPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Compiler.NativeO3",
+      "stage": "CPUCompiler",
+      "category": "CPUCompiler",
+      "subphase": "CPUCompiler.FlagPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Compiler.NativeO3OpenMP",
+      "stage": "CPUCompiler",
+      "category": "CPUCompiler",
+      "subphase": "CPUCompiler.FlagPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Compiler.MSVC.AVX2OpenMP",
+      "stage": "CPUCompiler",
+      "category": "CPUCompiler",
+      "subphase": "CPUCompiler.FlagPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Epilogue.Store.AlphaBeta",
+      "stage": "CPUEpilogue",
+      "category": "CPUEpilogue",
+      "subphase": "CPUEpilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Epilogue.Store.BetaZeroFastPath",
+      "stage": "CPUEpilogue",
+      "category": "CPUEpilogue",
+      "subphase": "CPUEpilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.PackBuffer.ThreadPrivate",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PackBufferOwnership",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Memory.PackBuffer.TilePrivate",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PackBufferOwnership",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.LoopOrder.OpenBLASPanelMajor",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.LoopOrderSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Packing.PackA.MRxKC",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PanelPackingPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Packing.PackB.KCxNR",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PanelPackingPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Packing.PackAB.MRxKC_KCxNR",
+      "stage": "CPUPacking",
+      "category": "CPUPacking",
+      "subphase": "CPUPacking.PanelPackingPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.MacroKernel.OpenBLASStyle.PanelDriver",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.MacroKernelDriverSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.TailKernel.FullTileFastPathScalarCleanup",
+      "stage": "CPUEpilogue",
+      "category": "CPUEpilogue",
+      "subphase": "CPUEpilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "CPU.Compiler.NativeO3FastMathOpenMP",
+      "stage": "CPUCompiler",
+      "category": "CPUCompiler",
+      "subphase": "CPUCompiler.FlagPolicy",
+      "maturity": "v1",
+      "priority": 98
+    },
+    {
+      "strategy_id": "CPU.MicroKernel.AVX2.FMA.4x16",
+      "stage": "CPUMicroKernel",
+      "category": "CPUMicroKernel",
+      "subphase": "CPUMicroKernel.KernelShapeSelection",
+      "maturity": "v1",
+      "priority": 96
+    },
+    {
+      "strategy_id": "CPU.MacroKernel.DirectTiled.Driver",
+      "stage": "CPULoopSchedule",
+      "category": "CPULoopSchedule",
+      "subphase": "CPULoopSchedule.MacroKernelDriverSelection",
+      "maturity": "v1",
+      "priority": 88
+    }
+  ],
+  "strategy_profiles": {
+    "throughput_exploration": {
+      "description": "Aggressive CPU path after correctness has passed. Allows full-tile fast paths with scalar cleanup and OpenBLAS-style macro/micro-kernel construction.",
+      "strategy_ids": [
+        "CPU.Packing.PackAB.MRxKC_KCxNR",
+        "CPU.Packing.PackB.KCxNR",
+        "CPU.Memory.PackBuffer.ThreadPrivate",
+        "CPU.MacroKernel.OpenBLASStyle.PanelDriver",
+        "CPU.LoopOrder.OpenBLASPanelMajor",
+        "CPU.MicroKernel.AVX512.FMA.8x16",
+        "CPU.MicroKernel.AVX2.FMA.6x16",
+        "CPU.Vectorization.AVX512.FMA.Explicit",
+        "CPU.Vectorization.AVX2.FMA.Explicit",
+        "CPU.KLoop.Unroll8",
+        "CPU.Parallel.OpenMP.Collapse2",
+        "CPU.Compiler.NativeO3OpenMP",
+        "CPU.TailKernel.FullTileFastPathScalarCleanup"
+      ]
+    }
+  }
+}

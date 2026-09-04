@@ -1,0 +1,1470 @@
+{
+  "library_name": "SGPO CPU C Strategy Library",
+  "library_version": "3.2-openblas-style-cpu-gemm-throughput-boundary-relaxed",
+  "target": {
+    "backend": "cpu",
+    "language": "c"
+  },
+  "stages": [
+    {
+      "stage_id": "CPUTiling",
+      "ordered_subphases": [
+        {
+          "subphase": "CPUTiling.L2BlockSelection",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Tiling.L2Block.128x128x128",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.L2BlockSelection",
+              "principle": "Use a conservative L2-resident outer tile for CPU GEMM.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null",
+                "hardware.cpu_cache.l2_cache_bytes != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l2_block_n != null",
+                "cpu_tiling.l2_block_k != null",
+                "cpu_tiling.l2_policy != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.l2_block_m": 128,
+                "cpu_tiling.l2_block_n": 128,
+                "cpu_tiling.l2_block_k": 128,
+                "cpu_tiling.l2_policy": "capacity_checked"
+              },
+              "maturity": "v1",
+              "priority": 90
+            },
+            {
+              "strategy_id": "CPU.Tiling.L2Block.192x128x128",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.L2BlockSelection",
+              "principle": "Use a larger M-panel L2 tile when the L2 budget permits.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null",
+                "hardware.cpu_cache.l2_cache_bytes != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l2_block_n != null",
+                "cpu_tiling.l2_block_k != null",
+                "cpu_tiling.l2_policy != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.l2_block_m": 192,
+                "cpu_tiling.l2_block_n": 128,
+                "cpu_tiling.l2_block_k": 128,
+                "cpu_tiling.l2_policy": "capacity_checked"
+              },
+              "maturity": "v1",
+              "priority": 80
+            },
+            {
+              "strategy_id": "CPU.Tiling.L2Block.256x128x128",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.L2BlockSelection",
+              "principle": "Use an aggressive L2 tile for large matrices and large private/shared L2 caches.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null",
+                "hardware.cpu_cache.l2_cache_bytes != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l2_block_n != null",
+                "cpu_tiling.l2_block_k != null",
+                "cpu_tiling.l2_policy != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.l2_block_m": 256,
+                "cpu_tiling.l2_block_n": 128,
+                "cpu_tiling.l2_block_k": 128,
+                "cpu_tiling.l2_policy": "capacity_checked"
+              },
+              "maturity": "v1",
+              "priority": 70
+            }
+          ]
+        },
+        {
+          "subphase": "CPUTiling.L1BlockSelection",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Tiling.L1Block.16x32x64",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.L1BlockSelection",
+              "principle": "Use a small L1-resident inner tile for conservative cache pressure.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l2_block_n != null",
+                "hardware.cpu_cache.l1_data_cache_bytes != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.l1_block_m != null",
+                "cpu_tiling.l1_block_n != null",
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.l1_policy != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.l1_block_m": 16,
+                "cpu_tiling.l1_block_n": 32,
+                "cpu_tiling.l1_block_k": 64,
+                "cpu_tiling.l1_policy": "capacity_checked"
+              },
+              "maturity": "v1",
+              "priority": 90
+            },
+            {
+              "strategy_id": "CPU.Tiling.L1Block.32x32x64",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.L1BlockSelection",
+              "principle": "Use a balanced L1 inner tile that usually fits 32 KiB L1D budgets.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l2_block_n != null",
+                "hardware.cpu_cache.l1_data_cache_bytes != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.l1_block_m != null",
+                "cpu_tiling.l1_block_n != null",
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.l1_policy != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.l1_block_m": 32,
+                "cpu_tiling.l1_block_n": 32,
+                "cpu_tiling.l1_block_k": 64,
+                "cpu_tiling.l1_policy": "capacity_checked"
+              },
+              "maturity": "v1",
+              "priority": 85
+            },
+            {
+              "strategy_id": "CPU.Tiling.L1Block.32x64x64",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.L1BlockSelection",
+              "principle": "Use a wide N L1 tile for contiguous B/C traversal when L1 capacity permits.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l2_block_n != null",
+                "hardware.cpu_cache.l1_data_cache_bytes != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.l1_block_m != null",
+                "cpu_tiling.l1_block_n != null",
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.l1_policy != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.l1_block_m": 32,
+                "cpu_tiling.l1_block_n": 64,
+                "cpu_tiling.l1_block_k": 64,
+                "cpu_tiling.l1_policy": "capacity_checked"
+              },
+              "maturity": "v1",
+              "priority": 60
+            }
+          ]
+        },
+        {
+          "subphase": "CPUTiling.RegisterBlockSelection",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Tiling.RegisterBlock.2x4",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.RegisterBlockSelection",
+              "principle": "Use a conservative 2x4 scalar register tile.",
+              "preconditions": [
+                "cpu_tiling.l1_block_m != null",
+                "cpu_tiling.l1_block_n != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.register_m": 2,
+                "cpu_tiling.register_n": 4
+              },
+              "maturity": "v1",
+              "priority": 70
+            },
+            {
+              "strategy_id": "CPU.Tiling.RegisterBlock.4x4",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.RegisterBlockSelection",
+              "principle": "Use a balanced 4x4 register tile.",
+              "preconditions": [
+                "cpu_tiling.l1_block_m != null",
+                "cpu_tiling.l1_block_n != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.register_m": 4,
+                "cpu_tiling.register_n": 4
+              },
+              "maturity": "v1",
+              "priority": 90
+            },
+            {
+              "strategy_id": "CPU.Tiling.RegisterBlock.4x8",
+              "stage": "CPUTiling",
+              "category": "CPUTiling",
+              "subphase": "CPUTiling.RegisterBlockSelection",
+              "principle": "Use a wider 4x8 register tile when register pressure is acceptable.",
+              "preconditions": [
+                "cpu_tiling.l1_block_m != null",
+                "cpu_tiling.l1_block_n != null"
+              ],
+              "postconditions": [
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null"
+              ],
+              "ir_updates": {
+                "cpu_tiling.register_m": 4,
+                "cpu_tiling.register_n": 8
+              },
+              "maturity": "v1",
+              "priority": 80
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "CPUPacking",
+      "ordered_subphases": [
+        {
+          "subphase": "CPUPacking.PanelPackingPolicy",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Memory.NoPack",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PanelPackingPolicy",
+              "principle": "Do not allocate packing buffers; access row-major source layout directly.",
+              "preconditions": [
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.l1_block_n != null"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_a != null",
+                "cpu_memory.pack_b != null",
+                "cpu_memory.pack_layout != null",
+                "cpu_memory.pack_buffer_scope != null",
+                "cpu_memory.prefetch != null"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_a": false,
+                "cpu_memory.pack_b": false,
+                "cpu_memory.pack_layout": "none",
+                "cpu_memory.pack_buffer_scope": "none",
+                "cpu_memory.prefetch": "disabled"
+              },
+              "maturity": "v1",
+              "priority": 50
+            },
+            {
+              "strategy_id": "CPU.Memory.PackB.ContiguousPanel",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PanelPackingPolicy",
+              "principle": "Pack B panels contiguously for SIMD-friendly N traversal. Packed B must preserve row-major NN semantics and be consumed consistently by the micro-kernel.",
+              "preconditions": [
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.l1_block_n != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_a != null",
+                "cpu_memory.pack_b != null",
+                "cpu_memory.pack_b_layout != null",
+                "cpu_memory.pack_b_access_equivalent = True"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_a": false,
+                "cpu_memory.pack_b": true,
+                "cpu_memory.pack_b_layout": "contiguous_panel",
+                "cpu_memory.pack_layout": "pack_b_panel",
+                "cpu_memory.pack_b_access_equivalent": true
+              },
+              "maturity": "v1",
+              "priority": 80
+            },
+            {
+              "strategy_id": "CPU.Memory.PackA.ContiguousPanel",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PanelPackingPolicy",
+              "principle": "Pack A panels contiguously for stable micro-kernel streaming.",
+              "preconditions": [
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.l1_block_n != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_a != null",
+                "cpu_memory.pack_b != null",
+                "cpu_memory.pack_a_layout != null",
+                "cpu_memory.pack_a_access_equivalent = True"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_a": true,
+                "cpu_memory.pack_b": false,
+                "cpu_memory.pack_a_layout": "contiguous_panel",
+                "cpu_memory.pack_layout": "pack_a_panel",
+                "cpu_memory.pack_a_access_equivalent": true
+              },
+              "maturity": "v1",
+              "priority": 70
+            },
+            {
+              "strategy_id": "CPU.Memory.PackAB.PanelMajor",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PanelPackingPolicy",
+              "principle": "Pack both A and B panels in micro-kernel-major layout. Packed B must preserve row-major NN semantics and be consumed consistently by the micro-kernel.",
+              "preconditions": [
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.l1_block_n != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_a != null",
+                "cpu_memory.pack_b != null",
+                "cpu_memory.pack_b_layout != null",
+                "cpu_memory.pack_b_access_equivalent = True"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_a": true,
+                "cpu_memory.pack_b": true,
+                "cpu_memory.pack_a_layout": "panel_major",
+                "cpu_memory.pack_b_layout": "panel_major",
+                "cpu_memory.pack_layout": "pack_ab_panel_major",
+                "cpu_memory.pack_b_access_equivalent": true
+              },
+              "maturity": "v1",
+              "priority": 95
+            },
+            {
+              "strategy_id": "CPU.Packing.PackA.MRxKC",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PanelPackingPolicy",
+              "principle": "Pack each A micro-panel as MR x KC contiguous data so the micro-kernel can stream A with unit-stride scalar loads or broadcasts.",
+              "preconditions": [
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.register_m != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_a = True",
+                "cpu_memory.pack_a_layout = mr_x_kc",
+                "cpu_memory.pack_a_access_equivalent = True"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_a": true,
+                "cpu_memory.pack_b": false,
+                "cpu_memory.pack_a_layout": "mr_x_kc",
+                "cpu_memory.pack_layout": "pack_a_mr_x_kc",
+                "cpu_memory.pack_a_access_equivalent": true
+              },
+              "implementation_contract": [
+                "emit a real pack_a loop nest",
+                "packed_a[rm * KC + kk] equals A[(m + rm) * K + (k0 + kk)] for valid rm/kk",
+                "pad or scalar-cleanup tails without reading out of bounds"
+              ],
+              "maturity": "v1",
+              "priority": 88
+            },
+            {
+              "strategy_id": "CPU.Packing.PackB.KCxNR",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PanelPackingPolicy",
+              "principle": "Pack each B panel as KC x NR so the micro-kernel vector-loads contiguous N-lane data for every K reduction step.",
+              "preconditions": [
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.register_n != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_b = True",
+                "cpu_memory.pack_b_layout = kc_x_nr",
+                "cpu_memory.pack_b_access_equivalent = True"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_a": false,
+                "cpu_memory.pack_b": true,
+                "cpu_memory.pack_b_layout": "kc_x_nr",
+                "cpu_memory.pack_layout": "pack_b_kc_x_nr",
+                "cpu_memory.pack_b_access_equivalent": true
+              },
+              "implementation_contract": [
+                "emit a real pack_b loop nest",
+                "packed_b[kk * NR + rn] equals B[(k0 + kk) * N + (n + rn)] for valid kk/rn",
+                "micro-kernel must consume packed_b with K-major then N-lane indexing"
+              ],
+              "maturity": "v1",
+              "priority": 92
+            },
+            {
+              "strategy_id": "CPU.Packing.PackAB.MRxKC_KCxNR",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PanelPackingPolicy",
+              "principle": "Pack A as MR x KC and B as KC x NR, matching the OpenBLAS-style micro-kernel dataflow.",
+              "preconditions": [
+                "cpu_tiling.l1_block_k != null",
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_a = True",
+                "cpu_memory.pack_b = True",
+                "cpu_memory.pack_a_layout = mr_x_kc",
+                "cpu_memory.pack_b_layout = kc_x_nr",
+                "cpu_memory.pack_a_access_equivalent = True",
+                "cpu_memory.pack_b_access_equivalent = True"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_a": true,
+                "cpu_memory.pack_b": true,
+                "cpu_memory.pack_a_layout": "mr_x_kc",
+                "cpu_memory.pack_b_layout": "kc_x_nr",
+                "cpu_memory.pack_layout": "pack_ab_mr_x_kc_kc_x_nr",
+                "cpu_memory.pack_a_access_equivalent": true,
+                "cpu_memory.pack_b_access_equivalent": true
+              },
+              "implementation_contract": [
+                "pack A/B before calling the micro-kernel",
+                "do not call external BLAS",
+                "keep packed buffers private under OpenMP"
+              ],
+              "maturity": "v1",
+              "priority": 98
+            }
+          ]
+        },
+        {
+          "subphase": "CPUPacking.PackBufferOwnership",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Memory.PackBuffer.ThreadPrivate",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PackBufferOwnership",
+              "principle": "Allocate packed A/B panels per OpenMP worker or inside independent tile work so no workers write the same panel buffer.",
+              "preconditions": [
+                "cpu_memory.pack_a != null",
+                "cpu_memory.pack_b != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_buffer_scope = thread_private"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_buffer_scope": "thread_private"
+              },
+              "maturity": "v1",
+              "priority": 95
+            },
+            {
+              "strategy_id": "CPU.Memory.PackBuffer.TilePrivate",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PackBufferOwnership",
+              "principle": "Allocate packed buffers inside each independent macro-tile body; this is safe for collapse-style OpenMP tiling.",
+              "preconditions": [
+                "cpu_memory.pack_a != null",
+                "cpu_memory.pack_b != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_memory.pack_buffer_scope = tile_private"
+              ],
+              "ir_updates": {
+                "cpu_memory.pack_buffer_scope": "tile_private"
+              },
+              "maturity": "v1",
+              "priority": 90
+            }
+          ]
+        },
+        {
+          "subphase": "CPUPacking.PrefetchPolicy",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Memory.Prefetch.Disabled",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PrefetchPolicy",
+              "principle": "Do not use software prefetch.",
+              "preconditions": [
+                "cpu_memory.pack_b != null"
+              ],
+              "postconditions": [
+                "cpu_memory.prefetch != null"
+              ],
+              "ir_updates": {
+                "cpu_memory.prefetch": "disabled"
+              },
+              "maturity": "v1",
+              "priority": 60
+            },
+            {
+              "strategy_id": "CPU.Memory.Prefetch.BPanel",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PrefetchPolicy",
+              "principle": "Prefetch future B panel cache lines conservatively.",
+              "preconditions": [
+                "cpu_memory.pack_b != null"
+              ],
+              "postconditions": [
+                "cpu_memory.prefetch != null"
+              ],
+              "ir_updates": {
+                "cpu_memory.prefetch": "b_panel"
+              },
+              "maturity": "v1",
+              "priority": 75
+            },
+            {
+              "strategy_id": "CPU.Memory.Prefetch.ABPanel",
+              "stage": "CPUPacking",
+              "category": "CPUPacking",
+              "subphase": "CPUPacking.PrefetchPolicy",
+              "principle": "Prefetch future A and B panel cache lines for packed micro-kernels.",
+              "preconditions": [
+                "cpu_memory.pack_b != null"
+              ],
+              "postconditions": [
+                "cpu_memory.prefetch != null"
+              ],
+              "ir_updates": {
+                "cpu_memory.prefetch": "ab_panel"
+              },
+              "maturity": "v1",
+              "priority": 85
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "CPUMicroKernel",
+      "ordered_subphases": [
+        {
+          "subphase": "CPUMicroKernel.KernelShapeSelection",
+          "strategies": [
+            {
+              "strategy_id": "CPU.MicroKernel.Scalar.4x4",
+              "stage": "CPUMicroKernel",
+              "category": "CPUMicroKernel",
+              "subphase": "CPUMicroKernel.KernelShapeSelection",
+              "principle": "Use a portable scalar 4x4 micro-kernel.",
+              "preconditions": [
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null",
+                "cpu_memory.pack_b != null"
+              ],
+              "postconditions": [
+                "cpu_microkernel.family != null",
+                "cpu_microkernel.mr != null",
+                "cpu_microkernel.nr != null",
+                "cpu_microkernel.k_reduction_policy = sequential_complete"
+              ],
+              "ir_updates": {
+                "cpu_microkernel.family": "scalar",
+                "cpu_microkernel.mr": 4,
+                "cpu_microkernel.nr": 4,
+                "cpu_microkernel.uses_intrinsics": false,
+                "cpu_microkernel.k_reduction_policy": "sequential_complete"
+              },
+              "maturity": "v1",
+              "priority": 70
+            },
+            {
+              "strategy_id": "CPU.MicroKernel.AVX2.FMA.4x8",
+              "stage": "CPUMicroKernel",
+              "category": "CPUMicroKernel",
+              "subphase": "CPUMicroKernel.KernelShapeSelection",
+              "principle": "Use an AVX2/FMA 4x8 micro-kernel with vector registers across N.",
+              "preconditions": [
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null",
+                "hardware.cpu_isa.avx2 = True",
+                "hardware.cpu_isa.fma = True"
+              ],
+              "postconditions": [
+                "cpu_microkernel.family != null",
+                "cpu_microkernel.mr != null",
+                "cpu_microkernel.nr != null",
+                "cpu_microkernel.simd_lane_mapping = n_contiguous",
+                "cpu_microkernel.a_operand_policy = scalar_broadcast",
+                "cpu_microkernel.k_reduction_policy = sequential_complete"
+              ],
+              "ir_updates": {
+                "cpu_microkernel.family": "avx2_fma",
+                "cpu_microkernel.mr": 4,
+                "cpu_microkernel.nr": 8,
+                "cpu_microkernel.uses_intrinsics": true,
+                "cpu_microkernel.simd_lane_mapping": "n_contiguous",
+                "cpu_microkernel.a_operand_policy": "scalar_broadcast",
+                "cpu_microkernel.k_reduction_policy": "sequential_complete"
+              },
+              "maturity": "v1",
+              "priority": 75,
+              "implementation_contract": [
+                "each accumulator vector represents one output row over contiguous N columns",
+                "for each K step, broadcast one scalar A value per output row",
+                "load one contiguous B vector for N lanes",
+                "perform FMA acc[row] = broadcast(A[row,k]) * B_vector + acc[row]",
+                "do not vector-load A across K and store it as N-lane C output",
+                "full-tile fast path is allowed only with scalar cleanup for tails"
+              ]
+            },
+            {
+              "strategy_id": "CPU.MicroKernel.AVX2.FMA.6x16",
+              "stage": "CPUMicroKernel",
+              "category": "CPUMicroKernel",
+              "subphase": "CPUMicroKernel.KernelShapeSelection",
+              "principle": "Use an aggressive AVX2/FMA 6x16 micro-kernel when registers permit.",
+              "preconditions": [
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null",
+                "hardware.cpu_isa.avx2 = True",
+                "hardware.cpu_isa.fma = True"
+              ],
+              "postconditions": [
+                "cpu_microkernel.family != null",
+                "cpu_microkernel.mr != null",
+                "cpu_microkernel.nr != null",
+                "cpu_microkernel.simd_lane_mapping = n_contiguous",
+                "cpu_microkernel.a_operand_policy = scalar_broadcast",
+                "cpu_microkernel.k_reduction_policy = sequential_complete"
+              ],
+              "ir_updates": {
+                "cpu_microkernel.family": "avx2_fma",
+                "cpu_microkernel.mr": 6,
+                "cpu_microkernel.nr": 16,
+                "cpu_microkernel.uses_intrinsics": true,
+                "cpu_microkernel.simd_lane_mapping": "n_contiguous",
+                "cpu_microkernel.a_operand_policy": "scalar_broadcast",
+                "cpu_microkernel.k_reduction_policy": "sequential_complete"
+              },
+              "maturity": "v1",
+              "priority": 94,
+              "implementation_contract": [
+                "each accumulator vector represents one output row over contiguous N columns",
+                "for each K step, broadcast one scalar A value per output row",
+                "load one contiguous B vector for N lanes",
+                "perform FMA acc[row] = broadcast(A[row,k]) * B_vector + acc[row]",
+                "do not vector-load A across K and store it as N-lane C output",
+                "full-tile fast path is allowed only with scalar cleanup for tails"
+              ]
+            },
+            {
+              "strategy_id": "CPU.MicroKernel.AVX512.FMA.8x16",
+              "stage": "CPUMicroKernel",
+              "category": "CPUMicroKernel",
+              "subphase": "CPUMicroKernel.KernelShapeSelection",
+              "principle": "Use an AVX512/FMA 8x16 micro-kernel on AVX512-capable CPUs.",
+              "preconditions": [
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null",
+                "cpu_memory.pack_b = True",
+                "cpu_memory.pack_buffer_scope != null",
+                "hardware.cpu_isa.avx512f = True"
+              ],
+              "postconditions": [
+                "cpu_microkernel.family != null",
+                "cpu_microkernel.mr != null",
+                "cpu_microkernel.nr != null",
+                "cpu_microkernel.simd_lane_mapping = n_contiguous",
+                "cpu_microkernel.a_operand_policy = scalar_broadcast",
+                "cpu_microkernel.k_reduction_policy = sequential_complete"
+              ],
+              "ir_updates": {
+                "cpu_microkernel.family": "avx512_fma",
+                "cpu_microkernel.mr": 8,
+                "cpu_microkernel.nr": 16,
+                "cpu_microkernel.uses_intrinsics": true,
+                "cpu_microkernel.simd_lane_mapping": "n_contiguous",
+                "cpu_microkernel.a_operand_policy": "scalar_broadcast",
+                "cpu_microkernel.k_reduction_policy": "sequential_complete"
+              },
+              "maturity": "v1",
+              "priority": 80,
+              "implementation_contract": [
+                "each accumulator vector represents one output row over contiguous N columns",
+                "for each K step, broadcast one scalar A value per output row",
+                "load one contiguous B vector for N lanes",
+                "perform FMA acc[row] = broadcast(A[row,k]) * B_vector + acc[row]",
+                "do not vector-load A across K and store it as N-lane C output",
+                "full-tile fast path is allowed only with scalar cleanup for tails"
+              ]
+            },
+            {
+              "strategy_id": "CPU.MicroKernel.AVX2.FMA.4x16",
+              "stage": "CPUMicroKernel",
+              "category": "CPUMicroKernel",
+              "subphase": "CPUMicroKernel.KernelShapeSelection",
+              "principle": "Use an AVX2/FMA 4x16 micro-kernel with two N-contiguous vectors per output row for higher arithmetic intensity than 4x8.",
+              "preconditions": [
+                "cpu_tiling.register_m != null",
+                "cpu_tiling.register_n != null",
+                "cpu_memory.pack_b = True",
+                "cpu_memory.pack_buffer_scope != null",
+                "hardware.cpu_isa.avx2 = True",
+                "hardware.cpu_isa.fma = True"
+              ],
+              "postconditions": [
+                "cpu_microkernel.family != null",
+                "cpu_microkernel.mr != null",
+                "cpu_microkernel.nr != null",
+                "cpu_microkernel.simd_lane_mapping = n_contiguous",
+                "cpu_microkernel.a_operand_policy = scalar_broadcast",
+                "cpu_microkernel.k_reduction_policy = sequential_complete"
+              ],
+              "ir_updates": {
+                "cpu_microkernel.family": "avx2_fma",
+                "cpu_microkernel.mr": 4,
+                "cpu_microkernel.nr": 16,
+                "cpu_microkernel.uses_intrinsics": true,
+                "cpu_microkernel.simd_lane_mapping": "n_contiguous",
+                "cpu_microkernel.a_operand_policy": "scalar_broadcast",
+                "cpu_microkernel.k_reduction_policy": "sequential_complete"
+              },
+              "maturity": "v1",
+              "priority": 96,
+              "implementation_contract": [
+                "each accumulator vector represents one output row over contiguous N columns",
+                "for each K step, broadcast one scalar A value per output row",
+                "load one contiguous B vector for N lanes",
+                "perform FMA acc[row] = broadcast(A[row,k]) * B_vector + acc[row]",
+                "do not vector-load A across K and store it as N-lane C output",
+                "full-tile fast path is allowed only with scalar cleanup for tails"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "CPUVectorization",
+      "ordered_subphases": [
+        {
+          "subphase": "CPUVectorization.SIMDPolicy",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Vectorization.CompilerAutoSIMD",
+              "stage": "CPUVectorization",
+              "category": "CPUVectorization",
+              "subphase": "CPUVectorization.SIMDPolicy",
+              "principle": "Shape loops so the compiler can auto-vectorize contiguous inner loops.",
+              "preconditions": [
+                "cpu_microkernel.family != null"
+              ],
+              "postconditions": [
+                "cpu_vectorization.policy != null",
+                "cpu_vectorization.tail_handling = True"
+              ],
+              "ir_updates": {
+                "cpu_vectorization.policy": "compiler_auto_simd",
+                "cpu_vectorization.isa": "auto",
+                "cpu_vectorization.tail_handling": true
+              },
+              "maturity": "v1",
+              "priority": 75
+            },
+            {
+              "strategy_id": "CPU.Vectorization.PragmaSIMD",
+              "stage": "CPUVectorization",
+              "category": "CPUVectorization",
+              "subphase": "CPUVectorization.SIMDPolicy",
+              "principle": "Use portable SIMD pragmas and preserve scalar tails.",
+              "preconditions": [
+                "cpu_microkernel.family != null"
+              ],
+              "postconditions": [
+                "cpu_vectorization.policy != null",
+                "cpu_vectorization.tail_handling = True"
+              ],
+              "ir_updates": {
+                "cpu_vectorization.policy": "pragma_simd",
+                "cpu_vectorization.isa": "auto",
+                "cpu_vectorization.tail_handling": true
+              },
+              "maturity": "v1",
+              "priority": 70
+            },
+            {
+              "strategy_id": "CPU.Vectorization.AVX2.FMA.Explicit",
+              "stage": "CPUVectorization",
+              "category": "CPUVectorization",
+              "subphase": "CPUVectorization.SIMDPolicy",
+              "principle": "Use explicit AVX2/FMA intrinsics such as _mm256_fmadd_ps with scalar tail handling.",
+              "preconditions": [
+                "cpu_microkernel.family != null",
+                "cpu_microkernel.simd_lane_mapping = n_contiguous",
+                "cpu_microkernel.a_operand_policy = scalar_broadcast",
+                "hardware.cpu_isa.avx2 = True",
+                "hardware.cpu_isa.fma = True"
+              ],
+              "postconditions": [
+                "cpu_vectorization.policy != null",
+                "cpu_vectorization.tail_handling = True",
+                "cpu_vectorization.lane_mapping = n_contiguous",
+                "cpu_vectorization.a_load_policy = scalar_broadcast"
+              ],
+              "ir_updates": {
+                "cpu_vectorization.policy": "explicit_intrinsics",
+                "cpu_vectorization.isa": "avx2_fma",
+                "cpu_vectorization.tail_handling": true,
+                "cpu_vectorization.lane_mapping": "n_contiguous",
+                "cpu_vectorization.a_load_policy": "scalar_broadcast"
+              },
+              "maturity": "v1",
+              "priority": 95,
+              "implementation_contract": [
+                "include immintrin.h in cpu_kernel.c when intrinsics are emitted",
+                "use unaligned loads/stores unless alignment has been proven",
+                "vector lanes must map to N-contiguous outputs",
+                "scalar cleanup handles remaining columns and rows"
+              ]
+            },
+            {
+              "strategy_id": "CPU.Vectorization.AVX512.FMA.Explicit",
+              "stage": "CPUVectorization",
+              "category": "CPUVectorization",
+              "subphase": "CPUVectorization.SIMDPolicy",
+              "principle": "Use explicit AVX512/FMA intrinsics with scalar tail handling.",
+              "preconditions": [
+                "cpu_microkernel.family != null",
+                "cpu_microkernel.simd_lane_mapping = n_contiguous",
+                "cpu_microkernel.a_operand_policy = scalar_broadcast",
+                "hardware.cpu_isa.avx512f = True"
+              ],
+              "postconditions": [
+                "cpu_vectorization.policy != null",
+                "cpu_vectorization.tail_handling = True",
+                "cpu_vectorization.lane_mapping = n_contiguous",
+                "cpu_vectorization.a_load_policy = scalar_broadcast"
+              ],
+              "ir_updates": {
+                "cpu_vectorization.policy": "explicit_intrinsics",
+                "cpu_vectorization.isa": "avx512_fma",
+                "cpu_vectorization.tail_handling": true,
+                "cpu_vectorization.lane_mapping": "n_contiguous",
+                "cpu_vectorization.a_load_policy": "scalar_broadcast"
+              },
+              "maturity": "v1",
+              "priority": 85,
+              "implementation_contract": [
+                "include immintrin.h in cpu_kernel.c when intrinsics are emitted",
+                "use unaligned loads/stores unless alignment has been proven",
+                "vector lanes must map to N-contiguous outputs",
+                "scalar cleanup handles remaining columns and rows"
+              ]
+            },
+            {
+              "strategy_id": "CPU.Vectorization.ScalarPortable",
+              "stage": "CPUVectorization",
+              "category": "CPUVectorization",
+              "subphase": "CPUVectorization.SIMDPolicy",
+              "principle": "Keep portable scalar C.",
+              "preconditions": [
+                "cpu_microkernel.family != null"
+              ],
+              "postconditions": [
+                "cpu_vectorization.policy != null",
+                "cpu_vectorization.tail_handling = True"
+              ],
+              "ir_updates": {
+                "cpu_vectorization.policy": "scalar_portable",
+                "cpu_vectorization.isa": "scalar",
+                "cpu_vectorization.tail_handling": true
+              },
+              "maturity": "v1",
+              "priority": 50
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "CPULoopSchedule",
+      "ordered_subphases": [
+        {
+          "subphase": "CPULoopSchedule.LoopOrderSelection",
+          "strategies": [
+            {
+              "strategy_id": "CPU.LoopOrder.IKJ",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.LoopOrderSelection",
+              "principle": "Use i-k-j order to reuse A across contiguous B/C columns.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_microkernel.family != null"
+              ],
+              "postconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "ir_updates": {
+                "cpu_schedule.loop_order": "ikj"
+              },
+              "maturity": "v1",
+              "priority": 80
+            },
+            {
+              "strategy_id": "CPU.LoopOrder.IJK",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.LoopOrderSelection",
+              "principle": "Use simple i-j-k order for correctness-first baseline.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_microkernel.family != null"
+              ],
+              "postconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "ir_updates": {
+                "cpu_schedule.loop_order": "ijk"
+              },
+              "maturity": "v1",
+              "priority": 50
+            },
+            {
+              "strategy_id": "CPU.LoopOrder.TiledIJK",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.LoopOrderSelection",
+              "principle": "Use outer L2/L1 tiled loops with inner micro loops.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_microkernel.family != null"
+              ],
+              "postconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "ir_updates": {
+                "cpu_schedule.loop_order": "tiled_ijk"
+              },
+              "maturity": "v1",
+              "priority": 85
+            },
+            {
+              "strategy_id": "CPU.LoopOrder.PackedPanelMajor",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.LoopOrderSelection",
+              "principle": "Use macro-kernel order around packed A/B panels and repeated micro-kernel calls.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_microkernel.family != null"
+              ],
+              "postconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "ir_updates": {
+                "cpu_schedule.loop_order": "packed_panel_major"
+              },
+              "maturity": "v1",
+              "priority": 95
+            },
+            {
+              "strategy_id": "CPU.LoopOrder.OpenBLASPanelMajor",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.LoopOrderSelection",
+              "principle": "Use OpenBLAS-style macro-kernel ordering: N panels, K panels, M panels, then packed copy and micro-kernel compute.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l1_block_k != null",
+                "cpu_microkernel.family != null",
+                "cpu_memory.pack_b = True"
+              ],
+              "postconditions": [
+                "cpu_schedule.loop_order = openblas_panel_major"
+              ],
+              "ir_updates": {
+                "cpu_schedule.loop_order": "openblas_panel_major"
+              },
+              "maturity": "v1",
+              "priority": 98
+            }
+          ]
+        },
+        {
+          "subphase": "CPULoopSchedule.UnrollSelection",
+          "strategies": [
+            {
+              "strategy_id": "CPU.KLoop.Unroll4",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.UnrollSelection",
+              "principle": "Unroll K by 4 to reduce loop overhead.",
+              "preconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "postconditions": [
+                "cpu_schedule.k_unroll != null"
+              ],
+              "ir_updates": {
+                "cpu_schedule.k_unroll": 4
+              },
+              "maturity": "v1",
+              "priority": 80
+            },
+            {
+              "strategy_id": "CPU.KLoop.Unroll8",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.UnrollSelection",
+              "principle": "Unroll K by 8 for larger K and better instruction scheduling.",
+              "preconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "postconditions": [
+                "cpu_schedule.k_unroll != null"
+              ],
+              "ir_updates": {
+                "cpu_schedule.k_unroll": 8
+              },
+              "maturity": "v1",
+              "priority": 90
+            },
+            {
+              "strategy_id": "CPU.KLoop.NoUnroll",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.UnrollSelection",
+              "principle": "Keep scalar K loop for maximum portability.",
+              "preconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "postconditions": [
+                "cpu_schedule.k_unroll != null"
+              ],
+              "ir_updates": {
+                "cpu_schedule.k_unroll": 1
+              },
+              "maturity": "v1",
+              "priority": 40
+            }
+          ]
+        },
+        {
+          "subphase": "CPULoopSchedule.MacroKernelDriverSelection",
+          "strategies": [
+            {
+              "strategy_id": "CPU.MacroKernel.OpenBLASStyle.PanelDriver",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.MacroKernelDriverSelection",
+              "principle": "Use an OpenBLAS-like macro-kernel: outer N panel, middle K panel, inner M panel, pack B once per N/K panel, pack A per M/K panel, then call a micro-kernel grid.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l2_block_n != null",
+                "cpu_tiling.l2_block_k != null",
+                "cpu_memory.pack_b = True",
+                "cpu_memory.pack_buffer_scope != null",
+                "cpu_microkernel.family != null",
+                "problem.size_class = large_square"
+              ],
+              "postconditions": [
+                "cpu_macro_kernel.driver = openblas_style_panel_driver",
+                "cpu_macro_kernel.calls_microkernel_grid = True",
+                "cpu_macro_kernel.pack_b_reuse_across_m = True"
+              ],
+              "ir_updates": {
+                "cpu_macro_kernel.driver": "openblas_style_panel_driver",
+                "cpu_macro_kernel.n_panel_outer": true,
+                "cpu_macro_kernel.k_panel_middle": true,
+                "cpu_macro_kernel.m_panel_inner": true,
+                "cpu_macro_kernel.pack_b_reuse_across_m": true,
+                "cpu_macro_kernel.calls_microkernel_grid": true
+              },
+              "implementation_contract": [
+                "emit explicit panel loops, not only flags",
+                "pack_b must be outside the M-panel loop for reuse",
+                "micro-kernel calls must cover every full MR x NR tile",
+                "tails must be handled by scalar cleanup or dedicated tail kernels"
+              ],
+              "maturity": "v1",
+              "priority": 99
+            },
+            {
+              "strategy_id": "CPU.MacroKernel.DirectTiled.Driver",
+              "stage": "CPULoopSchedule",
+              "category": "CPULoopSchedule",
+              "subphase": "CPULoopSchedule.MacroKernelDriverSelection",
+              "principle": "Use direct row-major L2/L1/register tiled loops without packing buffers, then call the selected scalar/SIMD micro-kernel over full tiles with scalar cleanup for tails.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_tiling.l2_block_n != null",
+                "cpu_tiling.l2_block_k != null",
+                "cpu_memory.pack_b = False",
+                "cpu_microkernel.family != null"
+              ],
+              "postconditions": [
+                "cpu_macro_kernel.driver = direct_tiled_driver",
+                "cpu_macro_kernel.calls_microkernel_grid = True",
+                "cpu_macro_kernel.direct_row_major = True"
+              ],
+              "ir_updates": {
+                "cpu_macro_kernel.driver": "direct_tiled_driver",
+                "cpu_macro_kernel.direct_row_major": true,
+                "cpu_macro_kernel.pack_b_reuse_across_m": false,
+                "cpu_macro_kernel.calls_microkernel_grid": true
+              },
+              "implementation_contract": [
+                "do not require packed A or packed B buffers",
+                "preserve row-major A/B/C indexing",
+                "micro-kernel calls must cover every full MR x NR tile",
+                "tails must be handled by scalar cleanup or dedicated tail kernels"
+              ],
+              "maturity": "v1",
+              "priority": 88
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "CPUParallelization",
+      "ordered_subphases": [
+        {
+          "subphase": "CPUParallelization.ThreadPolicy",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Parallel.Serial",
+              "stage": "CPUParallelization",
+              "category": "CPUParallelization",
+              "subphase": "CPUParallelization.ThreadPolicy",
+              "principle": "Use one host thread for portability.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_schedule.loop_order != null"
+              ],
+              "postconditions": [
+                "cpu_parallel.policy != null"
+              ],
+              "ir_updates": {
+                "cpu_parallel.policy": "serial"
+              },
+              "maturity": "v1",
+              "priority": 40
+            },
+            {
+              "strategy_id": "CPU.Parallel.OpenMP.RowBlock",
+              "stage": "CPUParallelization",
+              "category": "CPUParallelization",
+              "subphase": "CPUParallelization.ThreadPolicy",
+              "principle": "Parallelize independent L2 row blocks with OpenMP.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_schedule.loop_order != null",
+                "cpu_memory.pack_buffer_scope != null"
+              ],
+              "postconditions": [
+                "cpu_parallel.policy != null",
+                "cpu_parallel.output_tile_exclusive = True"
+              ],
+              "ir_updates": {
+                "cpu_parallel.policy": "openmp_row_block",
+                "cpu_parallel.output_tile_exclusive": true
+              },
+              "maturity": "v1",
+              "priority": 80
+            },
+            {
+              "strategy_id": "CPU.Parallel.OpenMP.Collapse2",
+              "stage": "CPUParallelization",
+              "category": "CPUParallelization",
+              "subphase": "CPUParallelization.ThreadPolicy",
+              "principle": "Use OpenMP collapse over independent C tile loops.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_schedule.loop_order != null",
+                "cpu_memory.pack_buffer_scope != null"
+              ],
+              "postconditions": [
+                "cpu_parallel.policy != null",
+                "cpu_parallel.output_tile_exclusive = True"
+              ],
+              "ir_updates": {
+                "cpu_parallel.policy": "openmp_collapse2",
+                "cpu_parallel.output_tile_exclusive": true
+              },
+              "maturity": "v1",
+              "priority": 75
+            },
+            {
+              "strategy_id": "CPU.Threading.OpenMP.TilePartition",
+              "stage": "CPUParallelization",
+              "category": "CPUParallelization",
+              "subphase": "CPUParallelization.ThreadPolicy",
+              "principle": "Partition independent L2 C tiles across OpenMP threads while avoiding write sharing.",
+              "preconditions": [
+                "cpu_tiling.l2_block_m != null",
+                "cpu_schedule.loop_order != null",
+                "cpu_memory.pack_buffer_scope != null"
+              ],
+              "postconditions": [
+                "cpu_parallel.policy != null",
+                "cpu_parallel.output_tile_exclusive = True"
+              ],
+              "ir_updates": {
+                "cpu_parallel.policy": "openmp_tile_partition",
+                "cpu_parallel.output_tile_exclusive": true
+              },
+              "maturity": "v1",
+              "priority": 90
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "CPUCompiler",
+      "ordered_subphases": [
+        {
+          "subphase": "CPUCompiler.FlagPolicy",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Compiler.PortableO2",
+              "stage": "CPUCompiler",
+              "category": "CPUCompiler",
+              "subphase": "CPUCompiler.FlagPolicy",
+              "principle": "Use portable optimization flags without ISA assumptions.",
+              "preconditions": [
+                "cpu_parallel.policy != null",
+                "cpu_vectorization.policy != null"
+              ],
+              "postconditions": [
+                "cpu_compiler.optimization_level != null",
+                "cpu_compiler.openmp != null"
+              ],
+              "ir_updates": {
+                "cpu_compiler.optimization_level": "O2",
+                "cpu_compiler.native_arch": false,
+                "cpu_compiler.openmp": false,
+                "cpu_compiler.vector_isa": "portable"
+              },
+              "maturity": "v1",
+              "priority": 50
+            },
+            {
+              "strategy_id": "CPU.Compiler.NativeO3",
+              "stage": "CPUCompiler",
+              "category": "CPUCompiler",
+              "subphase": "CPUCompiler.FlagPolicy",
+              "principle": "Use native architecture optimization flags for auto-vectorization.",
+              "preconditions": [
+                "cpu_parallel.policy != null",
+                "cpu_vectorization.policy != null"
+              ],
+              "postconditions": [
+                "cpu_compiler.optimization_level != null",
+                "cpu_compiler.openmp != null"
+              ],
+              "ir_updates": {
+                "cpu_compiler.optimization_level": "O3",
+                "cpu_compiler.native_arch": true,
+                "cpu_compiler.openmp": false,
+                "cpu_compiler.vector_isa": "native"
+              },
+              "maturity": "v1",
+              "priority": 80
+            },
+            {
+              "strategy_id": "CPU.Compiler.NativeO3OpenMP",
+              "stage": "CPUCompiler",
+              "category": "CPUCompiler",
+              "subphase": "CPUCompiler.FlagPolicy",
+              "principle": "Use native O3 and OpenMP flags for threaded CPU GEMM.",
+              "preconditions": [
+                "cpu_parallel.policy != null",
+                "cpu_vectorization.policy != null"
+              ],
+              "postconditions": [
+                "cpu_compiler.optimization_level != null",
+                "cpu_compiler.openmp != null"
+              ],
+              "ir_updates": {
+                "cpu_compiler.optimization_level": "O3",
+                "cpu_compiler.native_arch": true,
+                "cpu_compiler.openmp": true,
+                "cpu_compiler.vector_isa": "native"
+              },
+              "maturity": "v1",
+              "priority": 95
+            },
+            {
+              "strategy_id": "CPU.Compiler.MSVC.AVX2OpenMP",
+              "stage": "CPUCompiler",
+              "category": "CPUCompiler",
+              "subphase": "CPUCompiler.FlagPolicy",
+              "principle": "Use MSVC optimization with AVX2 and OpenMP enabled.",
+              "preconditions": [
+                "cpu_parallel.policy != null",
+                "cpu_vectorization.policy != null",
+                "hardware.cpu_isa.avx2 = True",
+                "hardware.cpu_isa.fma = True"
+              ],
+              "postconditions": [
+                "cpu_compiler.optimization_level != null",
+                "cpu_compiler.openmp != null"
+              ],
+              "ir_updates": {
+                "cpu_compiler.optimization_level": "O2",
+                "cpu_compiler.native_arch": false,
+                "cpu_compiler.openmp": true,
+                "cpu_compiler.vector_isa": "avx2"
+              },
+              "maturity": "v1",
+              "priority": 85
+            },
+            {
+              "strategy_id": "CPU.Compiler.NativeO3FastMathOpenMP",
+              "stage": "CPUCompiler",
+              "category": "CPUCompiler",
+              "subphase": "CPUCompiler.FlagPolicy",
+              "principle": "Use native architecture, OpenMP, fast floating-point contraction, and loop unrolling for throughput-oriented CPU SGEMM after correctness is established.",
+              "preconditions": [
+                "cpu_parallel.policy != null",
+                "cpu_vectorization.policy != null",
+                "hardware.cpu_isa.avx2 = True",
+                "hardware.cpu_isa.fma = True"
+              ],
+              "postconditions": [
+                "cpu_compiler.optimization_level = O3",
+                "cpu_compiler.native_arch = True",
+                "cpu_compiler.openmp = True",
+                "cpu_compiler.fast_math = True",
+                "cpu_compiler.unroll_loops = True"
+              ],
+              "ir_updates": {
+                "cpu_compiler.optimization_level": "O3",
+                "cpu_compiler.native_arch": true,
+                "cpu_compiler.openmp": true,
+                "cpu_compiler.vector_isa": "avx2_fma",
+                "cpu_compiler.fast_math": true,
+                "cpu_compiler.unroll_loops": true
+              },
+              "maturity": "v1",
+              "priority": 98,
+              "risk_level": "medium"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "CPUEpilogue",
+      "ordered_subphases": [
+        {
+          "subphase": "CPUEpilogue.StorePolicy",
+          "strategies": [
+            {
+              "strategy_id": "CPU.Epilogue.Store.AlphaBeta",
+              "stage": "CPUEpilogue",
+              "category": "CPUEpilogue",
+              "subphase": "CPUEpilogue.StorePolicy",
+              "principle": "Emit general alpha/beta C update.",
+              "preconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "postconditions": [
+                "cpu_epilogue.store_policy != null",
+                "cpu_tail.full_tile_fast_path != null",
+                "cpu_tail.scalar_cleanup = True"
+              ],
+              "ir_updates": {
+                "cpu_epilogue.store_policy": "alpha_beta",
+                "cpu_tail.full_tile_fast_path": false,
+                "cpu_tail.scalar_cleanup": true
+              },
+              "maturity": "v1",
+              "priority": 90
+            },
+            {
+              "strategy_id": "CPU.Epilogue.Store.BetaZeroFastPath",
+              "stage": "CPUEpilogue",
+              "category": "CPUEpilogue",
+              "subphase": "CPUEpilogue.StorePolicy",
+              "principle": "Use beta-zero fast path while preserving general signature.",
+              "preconditions": [
+                "cpu_schedule.loop_order != null"
+              ],
+              "postconditions": [
+                "cpu_epilogue.store_policy != null",
+                "cpu_tail.full_tile_fast_path != null",
+                "cpu_tail.scalar_cleanup = True"
+              ],
+              "ir_updates": {
+                "cpu_epilogue.store_policy": "beta_zero_fast_path",
+                "cpu_tail.full_tile_fast_path": false,
+                "cpu_tail.scalar_cleanup": true
+              },
+              "maturity": "v1",
+              "priority": 70
+            },
+            {
+              "strategy_id": "CPU.TailKernel.FullTileFastPathScalarCleanup",
+              "stage": "CPUEpilogue",
+              "category": "CPUEpilogue",
+              "subphase": "CPUEpilogue.StorePolicy",
+              "principle": "After correctness is established, use unchecked full-tile SIMD fast paths for complete MR/NR/KC tiles and a scalar cleanup path for all residual M/N/K tails.",
+              "preconditions": [
+                "cpu_microkernel.k_reduction_policy = sequential_complete",
+                "cpu_vectorization.tail_handling = True"
+              ],
+              "postconditions": [
+                "cpu_tail.full_tile_fast_path = True",
+                "cpu_tail.scalar_cleanup = True",
+                "cpu_safety.boundary_policy = full_tile_fast_path_with_scalar_cleanup"
+              ],
+              "ir_updates": {
+                "cpu_tail.full_tile_fast_path": true,
+                "cpu_tail.scalar_cleanup": true,
+                "cpu_safety.boundary_policy": "full_tile_fast_path_with_scalar_cleanup",
+                "cpu_epilogue.store_policy": "full_tile_fast_path_scalar_cleanup"
+              },
+              "implementation_contract": [
+                "inner full-tile micro-kernel may omit per-lane boundary checks",
+                "scalar cleanup must cover M%MR, N%NR, and K tails",
+                "alpha and beta are applied exactly once"
+              ],
+              "maturity": "v1",
+              "priority": 96
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

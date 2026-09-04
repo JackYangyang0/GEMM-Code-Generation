@@ -1,0 +1,2367 @@
+{
+  "index_name": "SGPO Stage-Oriented Strategy Index",
+  "index_version": "7.0-stage-oriented",
+  "source_indices": [
+    "/mnt/data/strategy_index_qimeng_v1_1.json",
+    "/mnt/data/strategy_index_warp_comprehensive_v5.json",
+    "/mnt/data/strategy_index_comprehensive_addendum_v6.json",
+    "/mnt/data/6c36e7cc-2fd4-4914-bc46-1fc5e6e09fd5.json"
+  ],
+  "strategy_count_total_loaded": 130,
+  "purpose": "Stage-oriented lightweight index for LLM strategy selection. Unlike the old flat index, this index restricts strategy selection by stage and subphase order. Micro-strategies only provide local OptIR fields. Stage-level verification runs after the stage is complete.",
+  "global_selection_rules": [
+    "The LLM must first follow current_stage and current_subphase.",
+    "Only select strategy_id values from the current subphase allowed_strategy_ids.",
+    "Do not skip required subphases.",
+    "Do not run full post verification after a micro-strategy unless the stage is complete.",
+    "Micro-strategy local checks only verify provided fields.",
+    "Stage-level checks verify derived fields, resource limits, mapping consistency, runtime safety, and dynamic correctness.",
+    "Patch generation should be stage-level when the stage plan is complete, unless the implementation explicitly supports safe subphase patches."
+  ],
+  "stage_order": [
+    "Tiling",
+    "Layout",
+    "MappingReordering",
+    "Vectorization",
+    "Pipeline",
+    "Epilogue",
+    "Compiler",
+    "FinalVerification"
+  ],
+  "stages": {
+    "Tiling": {
+      "stage_id": "Tiling",
+      "description": "Construct BM/BN/BK, WM/WN, TM/TN, WMITER/WNITER, and mapping fields before running tiling verification.",
+      "subphase_order": [
+        "Tiling.BlockTileSelection",
+        "Tiling.WarpTileSelection",
+        "Tiling.ThreadTileSelection",
+        "Tiling.MappingDerivation",
+        "Tiling.StageVerification"
+      ],
+      "subphases": [
+        {
+          "subphase_id": "Tiling.BlockTileSelection",
+          "order": 1,
+          "optional": false,
+          "purpose": "Choose CTA/block tile shape BM/BN/BK.",
+          "allowed_strategy_patterns": [
+            "Tiling.BlockTile.*"
+          ],
+          "allowed_strategy_ids": [
+            "Tiling.BlockTile.128x128x16",
+            "Tiling.BlockTile.128x128x8",
+            "Tiling.BlockTile.128x64x16",
+            "Tiling.BlockTile.32x32x8",
+            "Tiling.BlockTile.32x64x16",
+            "Tiling.BlockTile.64x128x16",
+            "Tiling.BlockTile.64x64x16"
+          ],
+          "candidate_count": 7,
+          "requires_fields": [
+            "problem.M",
+            "problem.N",
+            "problem.K"
+          ],
+          "provides_fields": [
+            "tiling.block_m",
+            "tiling.block_n",
+            "tiling.block_k"
+          ],
+          "derived_fields": {},
+          "local_checks": [
+            "tiling.block_m != null",
+            "tiling.block_n != null",
+            "tiling.block_k != null"
+          ],
+          "deferred_checks": [
+            "C_THREADS_LIMIT",
+            "C_WARP_THREAD_COVERAGE",
+            "C_REGISTER_PRESSURE",
+            "C_SHARED_MEMORY_LIMIT"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection.",
+            "For problem.size_class = large_square, prefer 128x128 CTA tiles with BK 16 or 32 when resource checks permit."
+          ],
+          "next_subphase": "Tiling.WarpTileSelection"
+        },
+        {
+          "subphase_id": "Tiling.WarpTileSelection",
+          "order": 2,
+          "optional": false,
+          "purpose": "Choose warp-level tile shape WM/WN inside CTA tile.",
+          "allowed_strategy_patterns": [
+            "Tiling.WarpTile.*"
+          ],
+          "allowed_strategy_ids": [
+            "Tiling.WarpTile.16x32",
+            "Tiling.WarpTile.32x32",
+            "Tiling.WarpTile.32x64",
+            "Tiling.WarpTile.64x32",
+            "Tiling.WarpTile.64x64",
+            "Tiling.WarpTile.ParametricWMxWN",
+            "Tiling.WarpTile.WMxWN"
+          ],
+          "candidate_count": 7,
+          "requires_fields": [
+            "tiling.block_m",
+            "tiling.block_n",
+            "hardware.warp_size"
+          ],
+          "provides_fields": [
+            "tiling.warp_tile.warp_m",
+            "tiling.warp_tile.warp_n",
+            "mapping.warps_m",
+            "mapping.warps_n",
+            "mapping.warps_per_block"
+          ],
+          "derived_fields": {
+            "mapping.warps_m": "tiling.block_m / tiling.warp_tile.warp_m",
+            "mapping.warps_n": "tiling.block_n / tiling.warp_tile.warp_n",
+            "mapping.warps_per_block": "mapping.warps_m * mapping.warps_n"
+          },
+          "local_checks": [
+            "tiling.block_m % tiling.warp_tile.warp_m == 0",
+            "tiling.block_n % tiling.warp_tile.warp_n == 0"
+          ],
+          "deferred_checks": [
+            "C_THREADS_LIMIT",
+            "C_WARP_THREAD_COVERAGE"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Tiling.ThreadTileSelection"
+        },
+        {
+          "subphase_id": "Tiling.ThreadTileSelection",
+          "order": 3,
+          "optional": false,
+          "purpose": "Choose per-thread output tile TM/TN and optional WMITER/WNITER.",
+          "allowed_strategy_patterns": [
+            "Tiling.ThreadTile.*",
+            "Tiling.WarpTile.Iteration.*"
+          ],
+          "allowed_strategy_ids": [
+            "Tiling.ThreadTile.2x2",
+            "Tiling.ThreadTile.4x4",
+            "Tiling.WarpTile.Iteration.WMITERxWNITER"
+          ],
+          "candidate_count": 3,
+          "requires_fields": [
+            "tiling.warp_tile.warp_m",
+            "tiling.warp_tile.warp_n",
+            "hardware.warp_size"
+          ],
+          "provides_fields": [
+            "tiling.thread_m",
+            "tiling.thread_n",
+            "tiling.warp_tile.warp_m_iter",
+            "tiling.warp_tile.warp_n_iter",
+            "mapping.outputs_per_thread",
+            "mapping.outputs_per_warp"
+          ],
+          "derived_fields": {
+            "mapping.outputs_per_thread": "thread_m * thread_n * warp_m_iter * warp_n_iter",
+            "mapping.outputs_per_warp": "hardware.warp_size * mapping.outputs_per_thread"
+          },
+          "local_checks": [
+            "tiling.thread_m != null",
+            "tiling.thread_n != null",
+            "if WMITER/WNITER are absent, default them to 1"
+          ],
+          "deferred_checks": [
+            "C_WARP_THREAD_COVERAGE",
+            "C_REGISTER_PRESSURE"
+          ],
+          "selection_rules": [
+            "Select one Tiling.ThreadTile.* strategy.",
+            "Optionally select one Tiling.WarpTile.Iteration.* strategy.",
+            "Do not change BM/BN/BK in this subphase."
+          ],
+          "next_subphase": "Tiling.MappingDerivation"
+        },
+        {
+          "subphase_id": "Tiling.MappingDerivation",
+          "order": 4,
+          "optional": false,
+          "purpose": "Derive warp/thread/lane/output ownership after block, warp, and thread tile fields are complete.",
+          "allowed_strategy_patterns": [
+            "Mapping.Warp.*",
+            "Mapping.WarpThreadTile.*",
+            "Mapping.LaneLayout.*",
+            "Mapping.Warp.OutputFragment2D"
+          ],
+          "allowed_strategy_ids": [
+            "Mapping.LaneLayout.1DContiguousM",
+            "Mapping.LaneLayout.1DContiguousN",
+            "Mapping.LaneLayout.2D_8x4",
+            "Mapping.Warp.BasicWidLane",
+            "Mapping.Warp.OutputFragment2D",
+            "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
+            "Mapping.WarpThreadTile.WarpLaneFragment2D"
+          ],
+          "candidate_count": 7,
+          "requires_fields": [
+            "tiling.block_m",
+            "tiling.block_n",
+            "tiling.block_k",
+            "tiling.warp_tile.warp_m",
+            "tiling.warp_tile.warp_n",
+            "tiling.thread_m",
+            "tiling.thread_n",
+            "hardware.warp_size"
+          ],
+          "provides_fields": [
+            "mapping.threads_per_block",
+            "mapping.thread_to_output",
+            "mapping.warp_to_output",
+            "mapping.lane_layout"
+          ],
+          "derived_fields": {
+            "mapping.threads_per_block": "mapping.warps_per_block * hardware.warp_size"
+          },
+          "local_checks": [
+            "mapping.threads_per_block is derived",
+            "thread_to_output is defined"
+          ],
+          "deferred_checks": [
+            "C_THREADS_LIMIT",
+            "C_WARP_THREAD_COVERAGE",
+            "C_THREAD_OUTPUT_COVERAGE"
+          ],
+          "selection_rules": [
+            "Select Mapping.Warp.BasicWidLane or equivalent before WarpLaneFragment2D mapping.",
+            "Select at most one lane layout strategy.",
+            "Mapping strategies derive ownership; they should not change tile shapes."
+          ],
+          "next_subphase": "Tiling.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "Tiling.StageVerification",
+        "required_fields": [
+          "tiling.block_m",
+          "tiling.block_n",
+          "tiling.block_k",
+          "tiling.warp_tile.warp_m",
+          "tiling.warp_tile.warp_n",
+          "tiling.thread_m",
+          "tiling.thread_n",
+          "mapping.warps_per_block",
+          "mapping.threads_per_block"
+        ],
+        "predicates": [
+          "tiling.block_m % tiling.warp_tile.warp_m == 0",
+          "tiling.block_n % tiling.warp_tile.warp_n == 0",
+          "tiling.warp_tile.warp_m * tiling.warp_tile.warp_n == hardware.warp_size * tiling.thread_m * tiling.thread_n * tiling.warp_tile.warp_m_iter * tiling.warp_tile.warp_n_iter",
+          "mapping.threads_per_block == mapping.warps_per_block * hardware.warp_size",
+          "mapping.threads_per_block <= hardware.max_threads_per_block"
+        ],
+        "verifiers": {
+          "required": [
+            "ir_predicate_eval",
+            "mapping_consistency_check"
+          ],
+          "best_effort": [
+            "occupancy_estimation_check",
+            "register_pressure_estimation_check"
+          ]
+        }
+      }
+    },
+    "Layout": {
+      "stage_id": "Layout",
+      "description": "Construct shared-memory layout and register accumulator layout before running shared-memory/resource verification.",
+      "subphase_order": [
+        "Layout.SharedMemoryDeclaration",
+        "Layout.SharedMemoryTransform",
+        "Layout.RegisterAccumulatorLayout",
+        "Layout.StageVerification"
+      ],
+      "subphases": [
+        {
+          "subphase_id": "Layout.SharedMemoryDeclaration",
+          "order": 1,
+          "optional": false,
+          "purpose": "Declare shared A/B layout and shapes.",
+          "allowed_strategy_patterns": [
+            "Layout.SharedMemory.AB.Basic"
+          ],
+          "allowed_strategy_ids": [
+            "Layout.SharedMemory.AB.Basic"
+          ],
+          "candidate_count": 1,
+          "requires_fields": [
+            "tiling.block_m",
+            "tiling.block_n",
+            "tiling.block_k"
+          ],
+          "provides_fields": [
+            "memory.use_shared_memory",
+            "memory.shared_A.shape",
+            "memory.shared_B.shape"
+          ],
+          "derived_fields": {},
+          "local_checks": [
+            "memory.use_shared_memory == true"
+          ],
+          "deferred_checks": [],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Layout.SharedMemoryTransform"
+        },
+        {
+          "subphase_id": "Layout.SharedMemoryTransform",
+          "order": 2,
+          "optional": true,
+          "purpose": "Apply padding, transpose, skew, or warp-aware shared-memory layout transforms.",
+          "allowed_strategy_patterns": [
+            "Layout.SharedMemory.Padding*",
+            "Layout.SharedMemory.Transpose*",
+            "Layout.SharedMemory.Skew*",
+            "Layout.SharedMemory.WarpAwareSwizzle*",
+            "Layout.SharedMemory.BankConflictAnalysis"
+          ],
+          "allowed_strategy_ids": [
+            "Layout.SharedMemory.BankConflictAnalysis",
+            "Layout.SharedMemory.PaddingA.Plus1",
+            "Layout.SharedMemory.PaddingAB.Plus1",
+            "Layout.SharedMemory.PaddingB.Plus1",
+            "Layout.SharedMemory.SkewA.Xor",
+            "Layout.SharedMemory.SkewB.Xor",
+            "Layout.SharedMemory.TransposeA",
+            "Layout.SharedMemory.TransposeB",
+            "Layout.SharedMemory.WarpAwareSwizzleA",
+            "Layout.SharedMemory.WarpAwareSwizzleB"
+          ],
+          "candidate_count": 10,
+          "requires_fields": [
+            "memory.shared_A.shape",
+            "memory.shared_B.shape"
+          ],
+          "provides_fields": [
+            "memory.shared_A.layout",
+            "memory.shared_B.layout",
+            "memory.shared_A.padding",
+            "memory.shared_B.padding"
+          ],
+          "derived_fields": {},
+          "local_checks": [
+            "shared-memory transform updates are internally consistent"
+          ],
+          "deferred_checks": [
+            "C_SHARED_MEMORY_LIMIT",
+            "C_SHARED_INDEXING_CONSISTENT"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Layout.RegisterAccumulatorLayout"
+        },
+        {
+          "subphase_id": "Layout.RegisterAccumulatorLayout",
+          "order": 3,
+          "optional": false,
+          "purpose": "Choose register accumulator layout for C.",
+          "allowed_strategy_patterns": [
+            "Layout.RegisterTile.C",
+            "Register.AccumulatorLayout.*"
+          ],
+          "allowed_strategy_ids": [
+            "Layout.RegisterTile.C",
+            "Register.AccumulatorLayout.2DArray",
+            "Register.AccumulatorLayout.FlatArray",
+            "Register.AccumulatorLayout.ScalarUnrolled"
+          ],
+          "candidate_count": 4,
+          "requires_fields": [
+            "tiling.thread_m",
+            "tiling.thread_n"
+          ],
+          "provides_fields": [
+            "memory.use_register_tile",
+            "register.accumulator.layout"
+          ],
+          "derived_fields": {},
+          "local_checks": [
+            "memory.use_register_tile == true"
+          ],
+          "deferred_checks": [
+            "C_ACCUMULATOR_INIT_STORE",
+            "C_REGISTER_PRESSURE"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Layout.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "Layout.StageVerification",
+        "required_fields": [
+          "memory.shared_A.shape",
+          "memory.shared_B.shape",
+          "memory.use_register_tile",
+          "register.accumulator.layout"
+        ],
+        "predicates": [
+          "resource.shared_memory.total_bytes <= hardware.max_shared_memory_per_block_bytes",
+          "shared A/B indexing is consistent with selected layout",
+          "all C accumulators are initialized and stored"
+        ],
+        "verifiers": {
+          "required": [
+            "ir_predicate_eval",
+            "static_code_pattern_check",
+            "dynamic_reference_check"
+          ],
+          "best_effort": [
+            "static_shared_bank_analysis",
+            "ptxas_resource_check"
+          ]
+        }
+      }
+    },
+    "MappingReordering": {
+      "stage_id": "MappingReordering",
+      "description": "Construct load/compute order, cooperative load mapping, and compute schedule.",
+      "subphase_order": [
+        "Reordering.LoadComputeStructure",
+        "Reordering.CooperativeLoadMapping",
+        "Reordering.ComputeSchedule",
+        "Reordering.StageVerification"
+      ],
+      "subphases": [
+        {
+          "subphase_id": "Reordering.LoadComputeStructure",
+          "order": 1,
+          "optional": false,
+          "purpose": "Separate global-to-shared load phase and compute phase.",
+          "allowed_strategy_patterns": [
+            "Reordering.LoadCompute.SeparatePhases"
+          ],
+          "allowed_strategy_ids": [
+            "Reordering.LoadCompute.SeparatePhases"
+          ],
+          "candidate_count": 1,
+          "requires_fields": [
+            "memory.use_shared_memory"
+          ],
+          "provides_fields": [
+            "schedule.loop_structure",
+            "synchronization.sync_policy.after_global_to_shared_load"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Reordering.CooperativeLoadMapping"
+        },
+        {
+          "subphase_id": "Reordering.CooperativeLoadMapping",
+          "order": 2,
+          "optional": false,
+          "purpose": "Choose coalesced, vectorized, or warp-cooperative global-to-shared load mapping.",
+          "allowed_strategy_patterns": [
+            "Reordering.ThreadMapping.CoalescedLoad*",
+            "Reordering.WarpSharedLoad.StripMined",
+            "Layout.SharedMemory.VectorizedStore*.float4"
+          ],
+          "allowed_strategy_ids": [
+            "Layout.SharedMemory.VectorizedStoreA.float4",
+            "Layout.SharedMemory.VectorizedStoreB.float4",
+            "Reordering.ThreadMapping.CoalescedLoadA",
+            "Reordering.ThreadMapping.CoalescedLoadB",
+            "Reordering.WarpSharedLoad.StripMined"
+          ],
+          "candidate_count": 5,
+          "requires_fields": [
+            "memory.shared_A.shape",
+            "memory.shared_B.shape",
+            "mapping.warp.enabled"
+          ],
+          "provides_fields": [
+            "memory.global_load_A.pattern",
+            "memory.global_load_B.pattern",
+            "memory.shared_load_mapping"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [
+            "C_VECTOR_ALIGNMENT",
+            "C_SHARED_INDEXING_CONSISTENT",
+            "C_SYNCHRONIZATION_SAFE"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Reordering.ComputeSchedule"
+        },
+        {
+          "subphase_id": "Reordering.ComputeSchedule",
+          "order": 3,
+          "optional": false,
+          "purpose": "Choose K-loop unrolling, FFMA schedule, register fragment cache, or warp compute schedule.",
+          "allowed_strategy_patterns": [
+            "Reordering.KLoop.*",
+            "Reordering.WarpCompute.*",
+            "Register.Cache*.Fragment",
+            "Register.FFMA.Schedule*"
+          ],
+          "allowed_strategy_ids": [
+            "Register.CacheA.Fragment",
+            "Register.CacheB.Fragment",
+            "Register.FFMA.ScheduleInterleaved",
+            "Register.FFMA.ScheduleOuterProduct",
+            "Reordering.KLoop.ManualUnroll",
+            "Reordering.KLoop.NoUnrollForRegisterPressure",
+            "Reordering.KLoop.PragmaUnroll",
+            "Reordering.KLoop.Unroll4",
+            "Reordering.KLoop.Unroll8",
+            "Reordering.KLoop.UnrollBK",
+            "Reordering.KLoop.UnrollMicroK",
+            "Reordering.WarpCompute.KOuterInnerSchedule"
+          ],
+          "candidate_count": 12,
+          "requires_fields": [
+            "memory.use_register_tile",
+            "mapping.thread_to_output"
+          ],
+          "provides_fields": [
+            "schedule.unrolling",
+            "schedule.ffma",
+            "schedule.warp_compute",
+            "register.cache_A",
+            "register.cache_B"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [
+            "C_K_REDUCTION_COMPLETE",
+            "C_REGISTER_PRESSURE"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Reordering.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "Reordering.StageVerification",
+        "predicates": [
+          "K reduction is complete",
+          "load/compute synchronization is safe",
+          "global and shared indexing semantics are preserved"
+        ],
+        "verifiers": {
+          "required": [
+            "compile_check",
+            "runtime_safety_check",
+            "dynamic_reference_check"
+          ],
+          "best_effort": [
+            "static_loop_domain_check",
+            "static_sync_pattern_check",
+            "ptxas_resource_check"
+          ]
+        }
+      }
+    },
+    "Vectorization": {
+      "stage_id": "Vectorization",
+      "description": "Construct alignment policy, load vectorization, and C-store vectorization.",
+      "subphase_order": [
+        "Vectorization.AlignmentPolicy",
+        "Vectorization.LoadVectorization",
+        "Vectorization.StoreVectorization",
+        "Vectorization.StageVerification"
+      ],
+      "subphases": [
+        {
+          "subphase_id": "Vectorization.AlignmentPolicy",
+          "order": 1,
+          "optional": false,
+          "purpose": "Select alignment proof/guard and boundary policy.",
+          "allowed_strategy_patterns": [
+            "Safety.AssumeDivisibleAligned",
+            "Vectorization.AlignmentGuard",
+            "Safety.BoundaryPolicy.*"
+          ],
+          "allowed_strategy_ids": [
+            "Safety.AssumeDivisibleAligned",
+            "Safety.BoundaryPolicy.GeneralGuarded",
+            "Safety.BoundaryPolicy.MaskLoad",
+            "Safety.BoundaryPolicy.PaddingInput",
+            "Safety.BoundaryPolicy.ScalarFallback",
+            "Safety.BoundaryPolicy.SeparateTailKernel",
+            "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+            "Vectorization.AlignmentGuard"
+          ],
+          "candidate_count": 8,
+          "requires_fields": [],
+          "provides_fields": [
+            "vectorization.A.alignment_guard",
+            "vectorization.B.alignment_guard",
+            "vectorization.A.alignment_proven",
+            "vectorization.B.alignment_proven",
+            "safety.boundary_policy"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Vectorization.LoadVectorization"
+        },
+        {
+          "subphase_id": "Vectorization.LoadVectorization",
+          "order": 2,
+          "optional": false,
+          "purpose": "Select vectorized A/B global or cooperative loads.",
+          "allowed_strategy_patterns": [
+            "Vectorization.GlobalLoadA.*",
+            "Vectorization.GlobalLoadB.*",
+            "Vectorization.GlobalLoadAB.*",
+            "Reordering.CooperativeVectorLoadAB.float4",
+            "Reordering.WarpCooperativeLoad*.float4"
+          ],
+          "allowed_strategy_ids": [
+            "Reordering.CooperativeVectorLoadAB.float4",
+            "Reordering.WarpCooperativeLoadA.float4",
+            "Reordering.WarpCooperativeLoadAB.float4",
+            "Reordering.WarpCooperativeLoadB.float4",
+            "Vectorization.GlobalLoadA.float2",
+            "Vectorization.GlobalLoadAB.float4",
+            "Vectorization.GlobalLoadB.float2"
+          ],
+          "candidate_count": 7,
+          "requires_fields": [
+            "alignment guard or alignment proof",
+            "tail handling or static divisible policy"
+          ],
+          "provides_fields": [
+            "vectorization.A.vector_width",
+            "vectorization.B.vector_width",
+            "memory.global_load_A.pattern",
+            "memory.global_load_B.pattern"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [
+            "C_VECTOR_ALIGNMENT",
+            "C_VECTOR_TAIL_HANDLING"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Vectorization.StoreVectorization"
+        },
+        {
+          "subphase_id": "Vectorization.StoreVectorization",
+          "order": 3,
+          "optional": true,
+          "purpose": "Deprecated compatibility subphase; C store policy is selected in Epilogue.StorePolicy.",
+          "allowed_strategy_patterns": [],
+          "allowed_strategy_ids": [],
+          "candidate_count": 0,
+          "requires_fields": [],
+          "provides_fields": [],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [
+            "C_VECTOR_C_STORE_ALIGNMENT",
+            "C_EPILOGUE_SEMANTICS"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Vectorization.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "Vectorization.StageVerification",
+        "predicates": [
+          "every vectorized access has alignment guard or alignment proof",
+          "tail handling exists or static divisible no-guard policy is active",
+          "runtime safety passes"
+        ],
+        "verifiers": {
+          "required": [
+            "compile_check",
+            "runtime_safety_check",
+            "dynamic_reference_check"
+          ],
+          "best_effort": [
+            "static_alignment_guard_pattern_check"
+          ]
+        }
+      }
+    },
+    "Pipeline": {
+      "stage_id": "Pipeline",
+      "description": "Construct buffering and prefetch after resource fields are derived.",
+      "subphase_order": [
+        "Pipeline.ResourcePrecheck",
+        "Pipeline.BufferingSelection",
+        "Pipeline.PrefetchSelection",
+        "Pipeline.LargeMatrixScheduling"
+      ],
+      "subphases": [
+        {
+          "subphase_id": "Pipeline.ResourcePrecheck",
+          "order": 1,
+          "optional": false,
+          "purpose": "Derive shared memory and register resource fields.",
+          "allowed_strategy_patterns": [],
+          "allowed_strategy_ids": [],
+          "candidate_count": 0,
+          "requires_fields": [
+            "tiling.block_m",
+            "tiling.block_n",
+            "tiling.block_k",
+            "memory.shared_A.shape",
+            "memory.shared_B.shape"
+          ],
+          "provides_fields": [
+            "resource.shared_memory.total_bytes",
+            "resource.register.estimated_per_thread"
+          ],
+          "derived_fields": {
+            "resource.shared_memory.total_bytes": "bytes(shared_A) + bytes(shared_B)",
+            "resource.register.estimated_per_thread": "accumulators + fragments + temporaries"
+          },
+          "local_checks": [],
+          "deferred_checks": [],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Pipeline.BufferingSelection"
+        },
+        {
+          "subphase_id": "Pipeline.BufferingSelection",
+          "order": 2,
+          "optional": false,
+          "purpose": "Select single/double buffer or no-async-copy policy.",
+          "allowed_strategy_patterns": [
+            "Pipeline.DoubleBuffer.*",
+            "Pipeline.WarpAwareDoubleBuffer.*",
+            "Pipeline.NoAsyncCopy.V1"
+          ],
+          "allowed_strategy_ids": [
+            "Pipeline.DoubleBuffer.SharedAB",
+            "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
+            "Pipeline.NoAsyncCopy.V1",
+            "Pipeline.WarpAwareDoubleBuffer.SharedAB"
+          ],
+          "candidate_count": 4,
+          "requires_fields": [
+            "resource.shared_memory.total_bytes"
+          ],
+          "provides_fields": [
+            "pipeline.enabled",
+            "pipeline.stage_count",
+            "pipeline.double_buffering",
+            "resource.shared_memory.pipeline_multiplier"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [
+            "C_SHARED_MEMORY_LIMIT",
+            "C_SYNCHRONIZATION_SAFE"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Pipeline.PrefetchSelection"
+        },
+        {
+          "subphase_id": "Pipeline.PrefetchSelection",
+          "order": 3,
+          "optional": true,
+          "purpose": "Select register/global prefetch strategy.",
+          "allowed_strategy_patterns": [
+            "Pipeline.WarpRegisterPrefetchAB",
+            "Memory.Prefetch.*"
+          ],
+          "allowed_strategy_ids": [
+            "Memory.Prefetch.GlobalToRegisterA",
+            "Memory.Prefetch.GlobalToRegisterB",
+            "Pipeline.WarpRegisterPrefetchAB"
+          ],
+          "candidate_count": 3,
+          "requires_fields": [],
+          "provides_fields": [
+            "pipeline.prefetch",
+            "resource.register"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [
+            "C_REGISTER_PRESSURE"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Pipeline.LargeMatrixScheduling"
+        },
+        {
+          "subphase_id": "Pipeline.LargeMatrixScheduling",
+          "order": 4,
+          "optional": true,
+          "purpose": "Select large-matrix CTA scheduling, L2 reuse, wave quantization, or persistent CTA policy after buffering/prefetch choices.",
+          "allowed_strategy_patterns": [
+            "Mapping.CTASwizzle.*",
+            "Memory.L2Reuse.*",
+            "Scheduling.PersistentCTA.*",
+            "Reduction.StreamK.*"
+          ],
+          "allowed_strategy_ids": [
+            "Mapping.CTASwizzle.GroupedN",
+            "Mapping.CTASwizzle.GroupedM",
+            "Memory.L2Reuse.CTASwizzleGroupedN",
+            "Memory.L2Reuse.CTASwizzleGroupedM",
+            "Scheduling.PersistentCTA.StaticTileLoop",
+            "Reduction.StreamK.WorkDecomposition"
+          ],
+          "candidate_count": 6,
+          "requires_fields": [
+            "problem.size_class",
+            "tiling.block_m",
+            "tiling.block_n",
+            "mapping.threads_per_block"
+          ],
+          "provides_fields": [
+            "scheduling.cta_swizzle",
+            "memory.l2_reuse_policy",
+            "scheduling.wave_quantization",
+            "scheduling.persistent_cta"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [
+            "C_GRID_COVERAGE",
+            "C_L2_REUSE_POLICY_SAFE",
+            "C_RUNTIME_CORRECTNESS"
+          ],
+          "selection_rules": [
+            "For problem.size_class = large_square, prefer grouped-N or grouped-M CTA swizzle to improve L2 tile reuse.",
+            "Use wave quantization or persistent CTA only in throughput_exploration after correctness has passed.",
+            "Do not change mathematical GEMM indexing or output coverage."
+          ],
+          "next_subphase": "Pipeline.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "Pipeline.StageVerification",
+        "predicates": [
+          "shared_memory_bytes * pipeline_multiplier <= hardware.max_shared_memory_per_block_bytes",
+          "buffer lifetime is safe",
+          "synchronization is safe"
+        ],
+        "verifiers": {
+          "required": [
+            "compile_check",
+            "runtime_safety_check",
+            "dynamic_reference_check"
+          ],
+          "best_effort": [
+            "static_buffer_lifetime_check",
+            "static_sync_pattern_check",
+            "ptxas_resource_check"
+          ]
+        }
+      }
+    },
+    "Epilogue": {
+      "stage_id": "Epilogue",
+      "description": "Construct alpha/beta policy, optional fusion, and C store policy.",
+      "subphase_order": [
+        "Epilogue.AlphaBetaPolicy",
+        "Epilogue.FusionPolicy",
+        "Epilogue.StorePolicy",
+        "Epilogue.StageVerification"
+      ],
+      "subphases": [
+        {
+          "subphase_id": "Epilogue.AlphaBetaPolicy",
+          "order": 1,
+          "optional": false,
+          "purpose": "Select general alpha/beta or beta-specialized epilogue.",
+          "allowed_strategy_patterns": [
+            "Epilogue.AlphaBeta.General",
+            "Epilogue.BetaZero.FastPath",
+            "Epilogue.BetaOne.FastPath"
+          ],
+          "allowed_strategy_ids": [
+            "Epilogue.AlphaBeta.General",
+            "Epilogue.BetaOne.FastPath",
+            "Epilogue.BetaZero.FastPath"
+          ],
+          "candidate_count": 3,
+          "requires_fields": [],
+          "provides_fields": [
+            "epilogue.mode"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Epilogue.FusionPolicy"
+        },
+        {
+          "subphase_id": "Epilogue.FusionPolicy",
+          "order": 2,
+          "optional": true,
+          "purpose": "Optionally fuse bias or activation.",
+          "allowed_strategy_patterns": [
+            "Epilogue.Fusion.*"
+          ],
+          "allowed_strategy_ids": [
+            "Epilogue.Fusion.Bias",
+            "Epilogue.Fusion.GELU",
+            "Epilogue.Fusion.ReLU"
+          ],
+          "candidate_count": 3,
+          "requires_fields": [],
+          "provides_fields": [
+            "epilogue.fusion"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Epilogue.StorePolicy"
+        },
+        {
+          "subphase_id": "Epilogue.StorePolicy",
+          "order": 3,
+          "optional": false,
+          "purpose": "Select C store mapping.",
+          "allowed_strategy_patterns": [
+            "Vectorization.StoreC.*",
+            "Epilogue.StoreC.*",
+            "Mapping.WarpStore.CoalescedC"
+          ],
+          "allowed_strategy_ids": [
+            "Epilogue.StoreC.CoalescedScalar",
+            "Epilogue.StoreC.Vectorized.float2",
+            "Epilogue.StoreC.Vectorized.float4",
+            "Mapping.WarpStore.CoalescedC",
+            "Vectorization.StoreC.AlignedNoGuard",
+            "Vectorization.StoreC.GuardedVectorStore",
+            "Vectorization.StoreC.SafeScalar",
+            "Vectorization.StoreC.float2",
+            "Vectorization.StoreC.float4"
+          ],
+          "candidate_count": 9,
+          "requires_fields": [],
+          "provides_fields": [
+            "memory.global_store_C.pattern",
+            "vectorization.C.vector_width"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [
+            "C_EPILOGUE_SEMANTICS",
+            "C_BOUNDARY_GUARD"
+          ],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Epilogue.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "Epilogue.StageVerification",
+        "predicates": [
+          "alpha/beta semantics preserved",
+          "C store boundary/alignment policy valid"
+        ],
+        "verifiers": {
+          "required": [
+            "compile_check",
+            "runtime_safety_check",
+            "dynamic_reference_check"
+          ],
+          "best_effort": [
+            "static_store_pattern_check"
+          ]
+        }
+      }
+    },
+    "Compiler": {
+      "stage_id": "Compiler",
+      "description": "Apply compiler and launch tuning only after semantic correctness is stable.",
+      "subphase_order": [
+        "Compiler.AttributeSelection",
+        "Compiler.ResourceTuning",
+        "Compiler.StageVerification"
+      ],
+      "subphases": [
+        {
+          "subphase_id": "Compiler.AttributeSelection",
+          "order": 1,
+          "optional": true,
+          "purpose": "Select launch bounds, restrict, inline, fast math, or shape specialization.",
+          "allowed_strategy_patterns": [
+            "Compiler.LaunchBounds.*",
+            "Compiler.ForceInline.*",
+            "Compiler.RestrictPointer",
+            "Compiler.FastMath.Enabled",
+            "Compiler.TemplateSpecialization.*"
+          ],
+          "allowed_strategy_ids": [
+            "Compiler.FastMath.Enabled",
+            "Compiler.ForceInline.DeviceFunctions",
+            "Compiler.LaunchBounds.MaxThreads",
+            "Compiler.LaunchBounds.MinBlocksPerSM",
+            "Compiler.RestrictPointer",
+            "Compiler.TemplateSpecialization.ShapeStatic"
+          ],
+          "candidate_count": 6,
+          "requires_fields": [],
+          "provides_fields": [
+            "compiler.attributes"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Compiler.ResourceTuning"
+        },
+        {
+          "subphase_id": "Compiler.ResourceTuning",
+          "order": 2,
+          "optional": true,
+          "purpose": "Tune max register count, occupancy, or wave quantization.",
+          "allowed_strategy_patterns": [
+            "Compiler.Ptxas.MaxRegisterCount",
+            "Tuning.WarpOccupancyBalance",
+            "Scheduling.WaveQuantization.SMResidentBlocks"
+          ],
+          "allowed_strategy_ids": [
+            "Compiler.Ptxas.MaxRegisterCount",
+            "Scheduling.WaveQuantization.SMResidentBlocks",
+            "Tuning.WarpOccupancyBalance"
+          ],
+          "candidate_count": 3,
+          "requires_fields": [],
+          "provides_fields": [
+            "resource.register.final",
+            "resource.occupancy.final"
+          ],
+          "derived_fields": {},
+          "local_checks": [],
+          "deferred_checks": [],
+          "selection_rules": [
+            "Select at most one strategy_id for this subphase unless the subphase explicitly allows multiple.",
+            "Do not select a strategy outside allowed_strategy_ids.",
+            "Do not generate code during strategy selection."
+          ],
+          "next_subphase": "Compiler.StageVerification"
+        }
+      ],
+      "stage_verification": {
+        "stage_id": "Compiler.StageVerification",
+        "predicates": [
+          "compile pass",
+          "no numerical policy violation",
+          "no unacceptable performance regression"
+        ],
+        "verifiers": {
+          "required": [
+            "compile_check",
+            "ptxas_resource_check",
+            "performance_check",
+            "dynamic_reference_check"
+          ],
+          "best_effort": []
+        }
+      }
+    }
+  },
+  "legacy_flat_views": {
+    "strategy_ids_by_stage": {
+      "Compiler": [
+        "Compiler.FastMath.Enabled",
+        "Compiler.ForceInline.DeviceFunctions",
+        "Compiler.LaunchBounds.MaxThreads",
+        "Compiler.LaunchBounds.MinBlocksPerSM",
+        "Compiler.Ptxas.MaxRegisterCount",
+        "Compiler.RestrictPointer",
+        "Compiler.TemplateSpecialization.ShapeStatic",
+        "Scheduling.WaveQuantization.SMResidentBlocks",
+        "Tuning.WarpOccupancyBalance"
+      ],
+      "Epilogue": [
+        "Epilogue.AlphaBeta.General",
+        "Epilogue.BetaOne.FastPath",
+        "Epilogue.BetaZero.FastPath",
+        "Epilogue.Fusion.Bias",
+        "Epilogue.Fusion.GELU",
+        "Epilogue.Fusion.ReLU",
+        "Epilogue.StoreC.CoalescedScalar",
+        "Epilogue.StoreC.Vectorized.float2",
+        "Epilogue.StoreC.Vectorized.float4",
+        "Mapping.WarpStore.CoalescedC",
+        "Vectorization.StoreC.AlignedNoGuard",
+        "Vectorization.StoreC.GuardedVectorStore",
+        "Vectorization.StoreC.SafeScalar",
+        "Vectorization.StoreC.float2",
+        "Vectorization.StoreC.float4"
+      ],
+      "Layout": [
+        "Layout.RegisterTile.C",
+        "Layout.SharedMemory.AB.Basic",
+        "Layout.SharedMemory.BankConflictAnalysis",
+        "Layout.SharedMemory.PaddingA.Plus1",
+        "Layout.SharedMemory.PaddingAB.Plus1",
+        "Layout.SharedMemory.PaddingB.Plus1",
+        "Layout.SharedMemory.SkewA.Xor",
+        "Layout.SharedMemory.SkewB.Xor",
+        "Layout.SharedMemory.TransposeA",
+        "Layout.SharedMemory.TransposeB",
+        "Layout.SharedMemory.WarpAwareSwizzleA",
+        "Layout.SharedMemory.WarpAwareSwizzleB",
+        "Register.AccumulatorLayout.2DArray",
+        "Register.AccumulatorLayout.FlatArray",
+        "Register.AccumulatorLayout.ScalarUnrolled"
+      ],
+      "MappingReordering": [
+        "Layout.SharedMemory.VectorizedStoreA.float4",
+        "Layout.SharedMemory.VectorizedStoreB.float4",
+        "Register.CacheA.Fragment",
+        "Register.CacheB.Fragment",
+        "Register.FFMA.ScheduleInterleaved",
+        "Register.FFMA.ScheduleOuterProduct",
+        "Reordering.KLoop.ManualUnroll",
+        "Reordering.KLoop.NoUnrollForRegisterPressure",
+        "Reordering.KLoop.PragmaUnroll",
+        "Reordering.KLoop.Unroll4",
+        "Reordering.KLoop.Unroll8",
+        "Reordering.KLoop.UnrollBK",
+        "Reordering.KLoop.UnrollMicroK",
+        "Reordering.LoadCompute.SeparatePhases",
+        "Reordering.ThreadMapping.CoalescedLoadA",
+        "Reordering.ThreadMapping.CoalescedLoadB",
+        "Reordering.WarpCompute.KOuterInnerSchedule",
+        "Reordering.WarpSharedLoad.StripMined"
+      ],
+      "Pipeline": [
+        "Mapping.CTASwizzle.GroupedM",
+        "Mapping.CTASwizzle.GroupedN",
+        "Memory.L2Reuse.CTASwizzleGroupedM",
+        "Memory.L2Reuse.CTASwizzleGroupedN",
+        "Memory.Prefetch.GlobalToRegisterA",
+        "Memory.Prefetch.GlobalToRegisterB",
+        "Pipeline.DoubleBuffer.SharedAB",
+        "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
+        "Pipeline.NoAsyncCopy.V1",
+        "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+        "Pipeline.WarpRegisterPrefetchAB",
+        "Reduction.StreamK.WorkDecomposition",
+        "Scheduling.PersistentCTA.StaticTileLoop"
+      ],
+      "Tiling": [
+        "Mapping.LaneLayout.1DContiguousM",
+        "Mapping.LaneLayout.1DContiguousN",
+        "Mapping.LaneLayout.2D_8x4",
+        "Mapping.Warp.BasicWidLane",
+        "Mapping.Warp.OutputFragment2D",
+        "Mapping.WarpThreadTile.WarpLaneFragment2D",
+        "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
+        "Tiling.BlockTile.128x128x16",
+        "Tiling.BlockTile.128x128x8",
+        "Tiling.BlockTile.128x64x16",
+        "Tiling.BlockTile.32x32x8",
+        "Tiling.BlockTile.32x64x16",
+        "Tiling.BlockTile.64x128x16",
+        "Tiling.BlockTile.64x64x16",
+        "Tiling.ThreadTile.2x2",
+        "Tiling.ThreadTile.4x4",
+        "Tiling.WarpTile.16x32",
+        "Tiling.WarpTile.32x32",
+        "Tiling.WarpTile.32x64",
+        "Tiling.WarpTile.64x32",
+        "Tiling.WarpTile.64x64",
+        "Tiling.WarpTile.Iteration.WMITERxWNITER",
+        "Tiling.WarpTile.ParametricWMxWN",
+        "Tiling.WarpTile.WMxWN"
+      ],
+      "Vectorization": [
+        "Reordering.CooperativeVectorLoadAB.float4",
+        "Reordering.WarpCooperativeLoadA.float4",
+        "Reordering.WarpCooperativeLoadAB.float4",
+        "Reordering.WarpCooperativeLoadB.float4",
+        "Safety.AssumeDivisibleAligned",
+        "Safety.BoundaryPolicy.GeneralGuarded",
+        "Safety.BoundaryPolicy.MaskLoad",
+        "Safety.BoundaryPolicy.PaddingInput",
+        "Safety.BoundaryPolicy.ScalarFallback",
+        "Safety.BoundaryPolicy.SeparateTailKernel",
+        "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+        "Vectorization.AlignmentGuard",
+        "Vectorization.GlobalLoadA.float2",
+        "Vectorization.GlobalLoadAB.float4",
+        "Vectorization.GlobalLoadB.float2"
+      ]
+    },
+    "strategy_ids_by_category": {
+      "Compiler": [
+        "Compiler.FastMath.Enabled",
+        "Compiler.ForceInline.DeviceFunctions",
+        "Compiler.LaunchBounds.MaxThreads",
+        "Compiler.LaunchBounds.MinBlocksPerSM",
+        "Compiler.Ptxas.MaxRegisterCount",
+        "Compiler.RestrictPointer",
+        "Compiler.TemplateSpecialization.ShapeStatic",
+        "Scheduling.WaveQuantization.SMResidentBlocks",
+        "Tuning.WarpOccupancyBalance"
+      ],
+      "Epilogue": [
+        "Epilogue.AlphaBeta.General",
+        "Epilogue.BetaOne.FastPath",
+        "Epilogue.BetaZero.FastPath",
+        "Epilogue.Fusion.Bias",
+        "Epilogue.Fusion.GELU",
+        "Epilogue.Fusion.ReLU",
+        "Epilogue.StoreC.CoalescedScalar",
+        "Epilogue.StoreC.Vectorized.float2",
+        "Epilogue.StoreC.Vectorized.float4",
+        "Mapping.WarpStore.CoalescedC",
+        "Vectorization.StoreC.AlignedNoGuard",
+        "Vectorization.StoreC.GuardedVectorStore",
+        "Vectorization.StoreC.SafeScalar",
+        "Vectorization.StoreC.float2",
+        "Vectorization.StoreC.float4"
+      ],
+      "Layout": [
+        "Layout.RegisterTile.C",
+        "Layout.SharedMemory.AB.Basic",
+        "Layout.SharedMemory.BankConflictAnalysis",
+        "Layout.SharedMemory.PaddingA.Plus1",
+        "Layout.SharedMemory.PaddingAB.Plus1",
+        "Layout.SharedMemory.PaddingB.Plus1",
+        "Layout.SharedMemory.SkewA.Xor",
+        "Layout.SharedMemory.SkewB.Xor",
+        "Layout.SharedMemory.TransposeA",
+        "Layout.SharedMemory.TransposeB",
+        "Layout.SharedMemory.WarpAwareSwizzleA",
+        "Layout.SharedMemory.WarpAwareSwizzleB",
+        "Register.AccumulatorLayout.2DArray",
+        "Register.AccumulatorLayout.FlatArray",
+        "Register.AccumulatorLayout.ScalarUnrolled"
+      ],
+      "MappingReordering": [
+        "Layout.SharedMemory.VectorizedStoreA.float4",
+        "Layout.SharedMemory.VectorizedStoreB.float4",
+        "Register.CacheA.Fragment",
+        "Register.CacheB.Fragment",
+        "Register.FFMA.ScheduleInterleaved",
+        "Register.FFMA.ScheduleOuterProduct",
+        "Reordering.KLoop.ManualUnroll",
+        "Reordering.KLoop.NoUnrollForRegisterPressure",
+        "Reordering.KLoop.PragmaUnroll",
+        "Reordering.KLoop.Unroll4",
+        "Reordering.KLoop.Unroll8",
+        "Reordering.KLoop.UnrollBK",
+        "Reordering.KLoop.UnrollMicroK",
+        "Reordering.LoadCompute.SeparatePhases",
+        "Reordering.ThreadMapping.CoalescedLoadA",
+        "Reordering.ThreadMapping.CoalescedLoadB",
+        "Reordering.WarpCompute.KOuterInnerSchedule",
+        "Reordering.WarpSharedLoad.StripMined"
+      ],
+      "Pipeline": [
+        "Mapping.CTASwizzle.GroupedM",
+        "Mapping.CTASwizzle.GroupedN",
+        "Memory.L2Reuse.CTASwizzleGroupedM",
+        "Memory.L2Reuse.CTASwizzleGroupedN",
+        "Memory.Prefetch.GlobalToRegisterA",
+        "Memory.Prefetch.GlobalToRegisterB",
+        "Pipeline.DoubleBuffer.SharedAB",
+        "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
+        "Pipeline.NoAsyncCopy.V1",
+        "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+        "Pipeline.WarpRegisterPrefetchAB",
+        "Reduction.StreamK.WorkDecomposition",
+        "Scheduling.PersistentCTA.StaticTileLoop"
+      ],
+      "Tiling": [
+        "Mapping.LaneLayout.1DContiguousM",
+        "Mapping.LaneLayout.1DContiguousN",
+        "Mapping.LaneLayout.2D_8x4",
+        "Mapping.Warp.BasicWidLane",
+        "Mapping.Warp.OutputFragment2D",
+        "Mapping.WarpThreadTile.WarpLaneFragment2D",
+        "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
+        "Tiling.BlockTile.128x128x16",
+        "Tiling.BlockTile.128x128x8",
+        "Tiling.BlockTile.128x64x16",
+        "Tiling.BlockTile.32x32x8",
+        "Tiling.BlockTile.32x64x16",
+        "Tiling.BlockTile.64x128x16",
+        "Tiling.BlockTile.64x64x16",
+        "Tiling.ThreadTile.2x2",
+        "Tiling.ThreadTile.4x4",
+        "Tiling.WarpTile.16x32",
+        "Tiling.WarpTile.32x32",
+        "Tiling.WarpTile.32x64",
+        "Tiling.WarpTile.64x32",
+        "Tiling.WarpTile.64x64",
+        "Tiling.WarpTile.Iteration.WMITERxWNITER",
+        "Tiling.WarpTile.ParametricWMxWN",
+        "Tiling.WarpTile.WMxWN"
+      ],
+      "Vectorization": [
+        "Reordering.CooperativeVectorLoadAB.float4",
+        "Reordering.WarpCooperativeLoadA.float4",
+        "Reordering.WarpCooperativeLoadAB.float4",
+        "Reordering.WarpCooperativeLoadB.float4",
+        "Safety.AssumeDivisibleAligned",
+        "Safety.BoundaryPolicy.GeneralGuarded",
+        "Safety.BoundaryPolicy.MaskLoad",
+        "Safety.BoundaryPolicy.PaddingInput",
+        "Safety.BoundaryPolicy.ScalarFallback",
+        "Safety.BoundaryPolicy.SeparateTailKernel",
+        "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+        "Vectorization.AlignmentGuard",
+        "Vectorization.GlobalLoadA.float2",
+        "Vectorization.GlobalLoadAB.float4",
+        "Vectorization.GlobalLoadB.float2"
+      ]
+    }
+  },
+  "subphase_candidate_summary": {
+    "Tiling.BlockTileSelection": {
+      "candidate_count": 7,
+      "allowed_strategy_ids": [
+        "Tiling.BlockTile.128x128x16",
+        "Tiling.BlockTile.128x128x8",
+        "Tiling.BlockTile.128x64x16",
+        "Tiling.BlockTile.32x32x8",
+        "Tiling.BlockTile.32x64x16",
+        "Tiling.BlockTile.64x128x16",
+        "Tiling.BlockTile.64x64x16"
+      ]
+    },
+    "Tiling.WarpTileSelection": {
+      "candidate_count": 7,
+      "allowed_strategy_ids": [
+        "Tiling.WarpTile.16x32",
+        "Tiling.WarpTile.32x32",
+        "Tiling.WarpTile.32x64",
+        "Tiling.WarpTile.64x32",
+        "Tiling.WarpTile.64x64",
+        "Tiling.WarpTile.ParametricWMxWN",
+        "Tiling.WarpTile.WMxWN"
+      ]
+    },
+    "Tiling.ThreadTileSelection": {
+      "candidate_count": 3,
+      "allowed_strategy_ids": [
+        "Tiling.ThreadTile.2x2",
+        "Tiling.ThreadTile.4x4",
+        "Tiling.WarpTile.Iteration.WMITERxWNITER"
+      ]
+    },
+    "Tiling.MappingDerivation": {
+      "candidate_count": 7,
+      "allowed_strategy_ids": [
+        "Mapping.LaneLayout.1DContiguousM",
+        "Mapping.LaneLayout.1DContiguousN",
+        "Mapping.LaneLayout.2D_8x4",
+        "Mapping.Warp.BasicWidLane",
+        "Mapping.Warp.OutputFragment2D",
+        "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
+        "Mapping.WarpThreadTile.WarpLaneFragment2D"
+      ]
+    },
+    "Layout.SharedMemoryDeclaration": {
+      "candidate_count": 1,
+      "allowed_strategy_ids": [
+        "Layout.SharedMemory.AB.Basic"
+      ]
+    },
+    "Layout.SharedMemoryTransform": {
+      "candidate_count": 10,
+      "allowed_strategy_ids": [
+        "Layout.SharedMemory.BankConflictAnalysis",
+        "Layout.SharedMemory.PaddingA.Plus1",
+        "Layout.SharedMemory.PaddingAB.Plus1",
+        "Layout.SharedMemory.PaddingB.Plus1",
+        "Layout.SharedMemory.SkewA.Xor",
+        "Layout.SharedMemory.SkewB.Xor",
+        "Layout.SharedMemory.TransposeA",
+        "Layout.SharedMemory.TransposeB",
+        "Layout.SharedMemory.WarpAwareSwizzleA",
+        "Layout.SharedMemory.WarpAwareSwizzleB"
+      ]
+    },
+    "Layout.RegisterAccumulatorLayout": {
+      "candidate_count": 4,
+      "allowed_strategy_ids": [
+        "Layout.RegisterTile.C",
+        "Register.AccumulatorLayout.2DArray",
+        "Register.AccumulatorLayout.FlatArray",
+        "Register.AccumulatorLayout.ScalarUnrolled"
+      ]
+    },
+    "Reordering.LoadComputeStructure": {
+      "candidate_count": 1,
+      "allowed_strategy_ids": [
+        "Reordering.LoadCompute.SeparatePhases"
+      ]
+    },
+    "Reordering.CooperativeLoadMapping": {
+      "candidate_count": 5,
+      "allowed_strategy_ids": [
+        "Layout.SharedMemory.VectorizedStoreA.float4",
+        "Layout.SharedMemory.VectorizedStoreB.float4",
+        "Reordering.ThreadMapping.CoalescedLoadA",
+        "Reordering.ThreadMapping.CoalescedLoadB",
+        "Reordering.WarpSharedLoad.StripMined"
+      ]
+    },
+    "Reordering.ComputeSchedule": {
+      "candidate_count": 12,
+      "allowed_strategy_ids": [
+        "Register.CacheA.Fragment",
+        "Register.CacheB.Fragment",
+        "Register.FFMA.ScheduleInterleaved",
+        "Register.FFMA.ScheduleOuterProduct",
+        "Reordering.KLoop.ManualUnroll",
+        "Reordering.KLoop.NoUnrollForRegisterPressure",
+        "Reordering.KLoop.PragmaUnroll",
+        "Reordering.KLoop.Unroll4",
+        "Reordering.KLoop.Unroll8",
+        "Reordering.KLoop.UnrollBK",
+        "Reordering.KLoop.UnrollMicroK",
+        "Reordering.WarpCompute.KOuterInnerSchedule"
+      ]
+    },
+    "Vectorization.AlignmentPolicy": {
+      "candidate_count": 8,
+      "allowed_strategy_ids": [
+        "Safety.AssumeDivisibleAligned",
+        "Safety.BoundaryPolicy.GeneralGuarded",
+        "Safety.BoundaryPolicy.MaskLoad",
+        "Safety.BoundaryPolicy.PaddingInput",
+        "Safety.BoundaryPolicy.ScalarFallback",
+        "Safety.BoundaryPolicy.SeparateTailKernel",
+        "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+        "Vectorization.AlignmentGuard"
+      ]
+    },
+    "Vectorization.LoadVectorization": {
+      "candidate_count": 7,
+      "allowed_strategy_ids": [
+        "Reordering.CooperativeVectorLoadAB.float4",
+        "Reordering.WarpCooperativeLoadA.float4",
+        "Reordering.WarpCooperativeLoadAB.float4",
+        "Reordering.WarpCooperativeLoadB.float4",
+        "Vectorization.GlobalLoadA.float2",
+        "Vectorization.GlobalLoadAB.float4",
+        "Vectorization.GlobalLoadB.float2"
+      ]
+    },
+    "Vectorization.StoreVectorization": {
+      "candidate_count": 0,
+      "allowed_strategy_ids": []
+    },
+    "Pipeline.ResourcePrecheck": {
+      "candidate_count": 0,
+      "allowed_strategy_ids": []
+    },
+    "Pipeline.BufferingSelection": {
+      "candidate_count": 4,
+      "allowed_strategy_ids": [
+        "Pipeline.DoubleBuffer.SharedAB",
+        "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
+        "Pipeline.NoAsyncCopy.V1",
+        "Pipeline.WarpAwareDoubleBuffer.SharedAB"
+      ]
+    },
+    "Pipeline.PrefetchSelection": {
+      "candidate_count": 3,
+      "allowed_strategy_ids": [
+        "Memory.Prefetch.GlobalToRegisterA",
+        "Memory.Prefetch.GlobalToRegisterB",
+        "Pipeline.WarpRegisterPrefetchAB"
+      ]
+    },
+    "Pipeline.LargeMatrixScheduling": {
+      "candidate_count": 6,
+      "allowed_strategy_ids": [
+        "Mapping.CTASwizzle.GroupedN",
+        "Mapping.CTASwizzle.GroupedM",
+        "Memory.L2Reuse.CTASwizzleGroupedN",
+        "Memory.L2Reuse.CTASwizzleGroupedM",
+        "Scheduling.PersistentCTA.StaticTileLoop",
+        "Reduction.StreamK.WorkDecomposition"
+      ]
+    },
+    "Epilogue.AlphaBetaPolicy": {
+      "candidate_count": 3,
+      "allowed_strategy_ids": [
+        "Epilogue.AlphaBeta.General",
+        "Epilogue.BetaOne.FastPath",
+        "Epilogue.BetaZero.FastPath"
+      ]
+    },
+    "Epilogue.FusionPolicy": {
+      "candidate_count": 3,
+      "allowed_strategy_ids": [
+        "Epilogue.Fusion.Bias",
+        "Epilogue.Fusion.GELU",
+        "Epilogue.Fusion.ReLU"
+      ]
+    },
+    "Epilogue.StorePolicy": {
+      "candidate_count": 9,
+      "allowed_strategy_ids": [
+        "Epilogue.StoreC.CoalescedScalar",
+        "Epilogue.StoreC.Vectorized.float2",
+        "Epilogue.StoreC.Vectorized.float4",
+        "Mapping.WarpStore.CoalescedC",
+        "Vectorization.StoreC.AlignedNoGuard",
+        "Vectorization.StoreC.GuardedVectorStore",
+        "Vectorization.StoreC.SafeScalar",
+        "Vectorization.StoreC.float2",
+        "Vectorization.StoreC.float4"
+      ]
+    },
+    "Compiler.AttributeSelection": {
+      "candidate_count": 6,
+      "allowed_strategy_ids": [
+        "Compiler.FastMath.Enabled",
+        "Compiler.ForceInline.DeviceFunctions",
+        "Compiler.LaunchBounds.MaxThreads",
+        "Compiler.LaunchBounds.MinBlocksPerSM",
+        "Compiler.RestrictPointer",
+        "Compiler.TemplateSpecialization.ShapeStatic"
+      ]
+    },
+    "Compiler.ResourceTuning": {
+      "candidate_count": 3,
+      "allowed_strategy_ids": [
+        "Compiler.Ptxas.MaxRegisterCount",
+        "Scheduling.WaveQuantization.SMResidentBlocks",
+        "Tuning.WarpOccupancyBalance"
+      ]
+    }
+  },
+  "strategies": [
+    {
+      "strategy_id": "Compiler.FastMath.Enabled",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Compiler.ForceInline.DeviceFunctions",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Compiler.LaunchBounds.MaxThreads",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Compiler.LaunchBounds.MinBlocksPerSM",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Compiler.Ptxas.MaxRegisterCount",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.ResourceTuning",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Compiler.RestrictPointer",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Compiler.TemplateSpecialization.ShapeStatic",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.AlphaBeta.General",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.AlphaBetaPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.BetaOne.FastPath",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.AlphaBetaPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.BetaZero.FastPath",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.AlphaBetaPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.Fusion.Bias",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.FusionPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.Fusion.GELU",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.FusionPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.Fusion.ReLU",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.FusionPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.StoreC.CoalescedScalar",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.StoreC.Vectorized.float2",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Epilogue.StoreC.Vectorized.float4",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.RegisterTile.C",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.RegisterAccumulatorLayout",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.AB.Basic",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryDeclaration",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.BankConflictAnalysis",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.PaddingA.Plus1",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.PaddingAB.Plus1",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.PaddingB.Plus1",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.SkewA.Xor",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.SkewB.Xor",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.TransposeA",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.TransposeB",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.VectorizedStoreA.float4",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.CooperativeLoadMapping",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.VectorizedStoreB.float4",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.CooperativeLoadMapping",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.WarpAwareSwizzleA",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Layout.SharedMemory.WarpAwareSwizzleB",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.CTASwizzle.GroupedM",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.CTASwizzle.GroupedN",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.LaneLayout.1DContiguousM",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.MappingDerivation",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.LaneLayout.1DContiguousN",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.MappingDerivation",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.LaneLayout.2D_8x4",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.MappingDerivation",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.Warp.BasicWidLane",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.MappingDerivation",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.Warp.OutputFragment2D",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.MappingDerivation",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.WarpStore.CoalescedC",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.WarpThreadTile.WarpLaneFragment2D",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.MappingDerivation",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.MappingDerivation",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Memory.L2Reuse.CTASwizzleGroupedM",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Memory.L2Reuse.CTASwizzleGroupedN",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Memory.Prefetch.GlobalToRegisterA",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.PrefetchSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Memory.Prefetch.GlobalToRegisterB",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.PrefetchSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Pipeline.DoubleBuffer.SharedAB",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.BufferingSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.BufferingSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Pipeline.NoAsyncCopy.V1",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.BufferingSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.BufferingSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Pipeline.WarpRegisterPrefetchAB",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.PrefetchSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reduction.StreamK.WorkDecomposition",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Register.AccumulatorLayout.2DArray",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.RegisterAccumulatorLayout",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Register.AccumulatorLayout.FlatArray",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.RegisterAccumulatorLayout",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Register.AccumulatorLayout.ScalarUnrolled",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.RegisterAccumulatorLayout",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Register.CacheA.Fragment",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Register.CacheB.Fragment",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Register.FFMA.ScheduleInterleaved",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Register.FFMA.ScheduleOuterProduct",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.CooperativeVectorLoadAB.float4",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.LoadVectorization",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.KLoop.ManualUnroll",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.KLoop.NoUnrollForRegisterPressure",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.KLoop.PragmaUnroll",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.KLoop.Unroll4",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.KLoop.Unroll8",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.KLoop.UnrollBK",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.KLoop.UnrollMicroK",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.LoadCompute.SeparatePhases",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.LoadComputeStructure",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.ThreadMapping.CoalescedLoadA",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.CooperativeLoadMapping",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.ThreadMapping.CoalescedLoadB",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.CooperativeLoadMapping",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.WarpCompute.KOuterInnerSchedule",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.WarpCooperativeLoadA.float4",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.LoadVectorization",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.WarpCooperativeLoadAB.float4",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.LoadVectorization",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.WarpCooperativeLoadB.float4",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.LoadVectorization",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.WarpSharedLoad.StripMined",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.CooperativeLoadMapping",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Safety.AssumeDivisibleAligned",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.AlignmentPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Safety.BoundaryPolicy.GeneralGuarded",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.AlignmentPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Safety.BoundaryPolicy.MaskLoad",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.AlignmentPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Safety.BoundaryPolicy.PaddingInput",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.AlignmentPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Safety.BoundaryPolicy.ScalarFallback",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.AlignmentPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Safety.BoundaryPolicy.SeparateTailKernel",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.AlignmentPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.AlignmentPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Scheduling.PersistentCTA.StaticTileLoop",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Scheduling.WaveQuantization.SMResidentBlocks",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.ResourceTuning",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.128x128x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.128x128x8",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.128x64x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.32x32x8",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.32x64x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.64x128x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.64x64x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.ThreadTile.2x2",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.ThreadTile.4x4",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.16x32",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.32x32",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.32x64",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.64x32",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.64x64",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.Iteration.WMITERxWNITER",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.ParametricWMxWN",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.WMxWN",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tuning.WarpOccupancyBalance",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.ResourceTuning",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.AlignmentGuard",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.AlignmentPolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.GlobalLoadA.float2",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.LoadVectorization",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.GlobalLoadAB.float4",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.LoadVectorization",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.GlobalLoadB.float2",
+      "stage": "Vectorization",
+      "category": "Vectorization",
+      "subphase": "Vectorization.LoadVectorization",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.StoreC.AlignedNoGuard",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.StoreC.GuardedVectorStore",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.StoreC.SafeScalar",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.StoreC.float2",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    },
+    {
+      "strategy_id": "Vectorization.StoreC.float4",
+      "stage": "Epilogue",
+      "category": "Epilogue",
+      "subphase": "Epilogue.StorePolicy",
+      "maturity": "v1"
+    }
+  ]
+}

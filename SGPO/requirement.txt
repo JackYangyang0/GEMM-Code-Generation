@@ -1,0 +1,10 @@
+openai>=1.0.0
+PyYAML>=6.0
+
+# Optional baseline dependency:
+# - torch with CUDA support, installed according to the local CUDA/driver version.
+
+# External toolchain dependencies, not installed by pip:
+# - NVIDIA CUDA Toolkit with nvcc for CUDA backend
+# - Microsoft Visual Studio C++ Build Tools / cl.exe for Windows CUDA builds
+# - OpenBLAS runtime/development files for CPU baseline comparison

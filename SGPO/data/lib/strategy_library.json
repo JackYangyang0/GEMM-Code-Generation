@@ -1,0 +1,2743 @@
+{
+  "model_name": "SGPO Stage-Oriented GEMM Construction Workflow",
+  "model_version": "7.0",
+  "why_needed": "GEMM optimization strategies have intra-stage construction order. Many verifications require multiple fields produced by several micro-strategies. Therefore post-verification must often be stage-level rather than immediate strategy-level.",
+  "stages": [
+    {
+      "stage_id": "Tiling",
+      "ordered_subphases": [
+        {
+          "subphase": "Tiling.BlockTileSelection",
+          "strategies": [
+            {
+              "strategy_id": "Tiling.BlockTile.128x128x16",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.BlockTileSelection",
+              "name": "Large-square CTA tile 128x128x16",
+              "title": "Large-square CTA tile 128x128x16",
+              "principle": "Use a larger square CTA tile for large square GEMM to increase arithmetic intensity and amortize global-memory traffic over more FMA operations.",
+              "applicable_when": "problem.size_class is large_square and resource checks permit the shared-memory/register footprint.",
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": [
+                  {
+                    "id": "BK_AT_LEAST_8",
+                    "kind": "ir_predicate",
+                    "op": "ge",
+                    "lhs": {
+                      "field": "problem.K"
+                    },
+                    "rhs": {
+                      "const": 8
+                    }
+                  }
+                ]
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "BM_128",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "tiling.block_m"
+                      },
+                      "rhs": {
+                        "const": 128
+                      }
+                    },
+                    {
+                      "id": "BN_128",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "tiling.block_n"
+                      },
+                      "rhs": {
+                        "const": 128
+                      }
+                    },
+                    {
+                      "id": "BK_16",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "tiling.block_k"
+                      },
+                      "rhs": {
+                        "const": 16
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": []
+                }
+              },
+              "ir_updates": {
+                "tiling.enabled": true,
+                "tiling.block_m": 128,
+                "tiling.block_n": 128,
+                "tiling.block_k": 16
+              },
+              "affected_fields": [
+                "tiling.enabled",
+                "tiling.block_m",
+                "tiling.block_n",
+                "tiling.block_k"
+              ],
+              "allowed_modified_regions": [
+                "LAUNCH_CONFIG"
+              ],
+              "resource_effects": {
+                "arithmetic_intensity": "increase",
+                "shared_memory_bytes": "increase",
+                "occupancy": "may decrease"
+              },
+              "risk_level": "medium",
+              "priority": 90,
+              "maturity": "v1"
+            },
+            {
+              "strategy_id": "Tiling.BlockTile.128x128x8",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.BlockTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.BlockTile.128x128x8 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null"
+              ],
+              "postconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.BlockTile.128x64x16",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.BlockTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.BlockTile.128x64x16 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null"
+              ],
+              "postconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.BlockTile.32x32x8",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.BlockTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.BlockTile.32x32x8 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null"
+              ],
+              "postconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.BlockTile.32x64x16",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.BlockTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.BlockTile.32x64x16 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null"
+              ],
+              "postconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.BlockTile.64x128x16",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.BlockTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.BlockTile.64x128x16 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null"
+              ],
+              "postconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.BlockTile.64x64x16",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.BlockTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.BlockTile.64x64x16 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "problem.M != null",
+                "problem.N != null",
+                "problem.K != null"
+              ],
+              "postconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Tiling.WarpTileSelection",
+          "strategies": [
+            {
+              "strategy_id": "Tiling.WarpTile.16x32",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.WarpTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.WarpTile.16x32 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "mapping.warps_m != null",
+                "mapping.warps_n != null",
+                "mapping.warps_per_block != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.WarpTile.32x32",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.WarpTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.WarpTile.32x32 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "mapping.warps_m != null",
+                "mapping.warps_n != null",
+                "mapping.warps_per_block != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.WarpTile.32x64",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.WarpTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.WarpTile.32x64 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "mapping.warps_m != null",
+                "mapping.warps_n != null",
+                "mapping.warps_per_block != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.WarpTile.64x32",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.WarpTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.WarpTile.64x32 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "mapping.warps_m != null",
+                "mapping.warps_n != null",
+                "mapping.warps_per_block != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.WarpTile.64x64",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.WarpTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.WarpTile.64x64 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "mapping.warps_m != null",
+                "mapping.warps_n != null",
+                "mapping.warps_per_block != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.WarpTile.ParametricWMxWN",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.WarpTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.WarpTile.ParametricWMxWN from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "mapping.warps_m != null",
+                "mapping.warps_n != null",
+                "mapping.warps_per_block != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.WarpTile.WMxWN",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.WarpTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.WarpTile.WMxWN from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "mapping.warps_m != null",
+                "mapping.warps_n != null",
+                "mapping.warps_per_block != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Tiling.ThreadTileSelection",
+          "strategies": [
+            {
+              "strategy_id": "Tiling.ThreadTile.2x2",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.ThreadTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.ThreadTile.2x2 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "tiling.warp_tile.warp_m_iter != null",
+                "tiling.warp_tile.warp_n_iter != null",
+                "mapping.outputs_per_thread != null",
+                "mapping.outputs_per_warp != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.ThreadTile.4x4",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.ThreadTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.ThreadTile.4x4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "tiling.warp_tile.warp_m_iter != null",
+                "tiling.warp_tile.warp_n_iter != null",
+                "mapping.outputs_per_thread != null",
+                "mapping.outputs_per_warp != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Tiling.WarpTile.Iteration.WMITERxWNITER",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.ThreadTileSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tiling.WarpTile.Iteration.WMITERxWNITER from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "tiling.warp_tile.warp_m_iter != null",
+                "tiling.warp_tile.warp_n_iter != null",
+                "mapping.outputs_per_thread != null",
+                "mapping.outputs_per_warp != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Tiling.MappingDerivation",
+          "strategies": [
+            {
+              "strategy_id": "Mapping.LaneLayout.1DContiguousM",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.MappingDerivation",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Mapping.LaneLayout.1DContiguousM from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null",
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "mapping.threads_per_block != null",
+                "mapping.thread_to_output != null",
+                "mapping.warp_to_output != null",
+                "mapping.lane_layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Mapping.LaneLayout.1DContiguousN",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.MappingDerivation",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Mapping.LaneLayout.1DContiguousN from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null",
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "mapping.threads_per_block != null",
+                "mapping.thread_to_output != null",
+                "mapping.warp_to_output != null",
+                "mapping.lane_layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Mapping.LaneLayout.2D_8x4",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.MappingDerivation",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Mapping.LaneLayout.2D_8x4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null",
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "mapping.threads_per_block != null",
+                "mapping.thread_to_output != null",
+                "mapping.warp_to_output != null",
+                "mapping.lane_layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Mapping.Warp.BasicWidLane",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.MappingDerivation",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Mapping.Warp.BasicWidLane from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null",
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "mapping.threads_per_block != null",
+                "mapping.thread_to_output != null",
+                "mapping.warp_to_output != null",
+                "mapping.lane_layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Mapping.Warp.OutputFragment2D",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.MappingDerivation",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Mapping.Warp.OutputFragment2D from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null",
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "mapping.threads_per_block != null",
+                "mapping.thread_to_output != null",
+                "mapping.warp_to_output != null",
+                "mapping.lane_layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.MappingDerivation",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Mapping.WarpThreadTile.WarpLaneFragmentBasic from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null",
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "mapping.threads_per_block != null",
+                "mapping.thread_to_output != null",
+                "mapping.warp_to_output != null",
+                "mapping.lane_layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Mapping.WarpThreadTile.WarpLaneFragment2D",
+              "stage": "Tiling",
+              "category": "Tiling",
+              "subphase": "Tiling.MappingDerivation",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Mapping.WarpThreadTile.WarpLaneFragment2D from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null",
+                "tiling.warp_tile.warp_m != null",
+                "tiling.warp_tile.warp_n != null",
+                "tiling.thread_m != null",
+                "tiling.thread_n != null",
+                "hardware.warp_size != null"
+              ],
+              "postconditions": [
+                "mapping.threads_per_block != null",
+                "mapping.thread_to_output != null",
+                "mapping.warp_to_output != null",
+                "mapping.lane_layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "Layout",
+      "ordered_subphases": [
+        {
+          "subphase": "Layout.SharedMemoryDeclaration",
+          "strategies": [
+            {
+              "strategy_id": "Layout.SharedMemory.AB.Basic",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryDeclaration",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.AB.Basic from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.block_m != null",
+                "tiling.block_n != null",
+                "tiling.block_k != null"
+              ],
+              "postconditions": [
+                "memory.use_shared_memory != null",
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Layout.SharedMemoryTransform",
+          "strategies": [
+            {
+              "strategy_id": "Layout.SharedMemory.BankConflictAnalysis",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.BankConflictAnalysis from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.PaddingA.Plus1",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.PaddingA.Plus1 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.PaddingAB.Plus1",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.PaddingAB.Plus1 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.PaddingB.Plus1",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.PaddingB.Plus1 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.SkewA.Xor",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.SkewA.Xor from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.SkewB.Xor",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.SkewB.Xor from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.TransposeA",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.TransposeA from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.TransposeB",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.TransposeB from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.WarpAwareSwizzleA",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.WarpAwareSwizzleA from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.WarpAwareSwizzleB",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.SharedMemoryTransform",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.WarpAwareSwizzleB from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null"
+              ],
+              "postconditions": [
+                "memory.shared_A.layout != null",
+                "memory.shared_B.layout != null",
+                "memory.shared_A.padding != null",
+                "memory.shared_B.padding != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Layout.RegisterAccumulatorLayout",
+          "strategies": [
+            {
+              "strategy_id": "Layout.RegisterTile.C",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.RegisterAccumulatorLayout",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.RegisterTile.C from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.thread_m != null",
+                "tiling.thread_n != null"
+              ],
+              "postconditions": [
+                "memory.use_register_tile != null",
+                "register.accumulator.layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Register.AccumulatorLayout.2DArray",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.RegisterAccumulatorLayout",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Register.AccumulatorLayout.2DArray from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.thread_m != null",
+                "tiling.thread_n != null"
+              ],
+              "postconditions": [
+                "memory.use_register_tile != null",
+                "register.accumulator.layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Register.AccumulatorLayout.FlatArray",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.RegisterAccumulatorLayout",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Register.AccumulatorLayout.FlatArray from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.thread_m != null",
+                "tiling.thread_n != null"
+              ],
+              "postconditions": [
+                "memory.use_register_tile != null",
+                "register.accumulator.layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Register.AccumulatorLayout.ScalarUnrolled",
+              "stage": "Layout",
+              "category": "Layout",
+              "subphase": "Layout.RegisterAccumulatorLayout",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Register.AccumulatorLayout.ScalarUnrolled from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "tiling.thread_m != null",
+                "tiling.thread_n != null"
+              ],
+              "postconditions": [
+                "memory.use_register_tile != null",
+                "register.accumulator.layout != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "MappingReordering",
+      "ordered_subphases": [
+        {
+          "subphase": "Reordering.LoadComputeStructure",
+          "strategies": [
+            {
+              "strategy_id": "Reordering.LoadCompute.SeparatePhases",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.LoadComputeStructure",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.LoadCompute.SeparatePhases from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_shared_memory != null"
+              ],
+              "postconditions": [
+                "schedule.loop_structure != null",
+                "synchronization.sync_policy.after_global_to_shared_load != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Reordering.CooperativeLoadMapping",
+          "strategies": [
+            {
+              "strategy_id": "Layout.SharedMemory.VectorizedStoreA.float4",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.CooperativeLoadMapping",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.VectorizedStoreA.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null",
+                "mapping.warp.enabled != null"
+              ],
+              "postconditions": [
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null",
+                "memory.shared_load_mapping != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Layout.SharedMemory.VectorizedStoreB.float4",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.CooperativeLoadMapping",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Layout.SharedMemory.VectorizedStoreB.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null",
+                "mapping.warp.enabled != null"
+              ],
+              "postconditions": [
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null",
+                "memory.shared_load_mapping != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.ThreadMapping.CoalescedLoadA",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.CooperativeLoadMapping",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.ThreadMapping.CoalescedLoadA from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null",
+                "mapping.warp.enabled != null"
+              ],
+              "postconditions": [
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null",
+                "memory.shared_load_mapping != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.ThreadMapping.CoalescedLoadB",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.CooperativeLoadMapping",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.ThreadMapping.CoalescedLoadB from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null",
+                "mapping.warp.enabled != null"
+              ],
+              "postconditions": [
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null",
+                "memory.shared_load_mapping != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.WarpSharedLoad.StripMined",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.CooperativeLoadMapping",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.WarpSharedLoad.StripMined from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.shared_A.shape != null",
+                "memory.shared_B.shape != null",
+                "mapping.warp.enabled != null"
+              ],
+              "postconditions": [
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null",
+                "memory.shared_load_mapping != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Reordering.ComputeSchedule",
+          "strategies": [
+            {
+              "strategy_id": "Register.CacheA.Fragment",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Register.CacheA.Fragment from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Register.CacheB.Fragment",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Register.CacheB.Fragment from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Register.FFMA.ScheduleInterleaved",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Register.FFMA.ScheduleInterleaved from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Register.FFMA.ScheduleOuterProduct",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Register.FFMA.ScheduleOuterProduct from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.KLoop.ManualUnroll",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.KLoop.ManualUnroll from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.KLoop.NoUnrollForRegisterPressure",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.KLoop.NoUnrollForRegisterPressure from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.KLoop.PragmaUnroll",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.KLoop.PragmaUnroll from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.KLoop.Unroll4",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.KLoop.Unroll4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.KLoop.Unroll8",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "name": "K-loop Unroll x8",
+              "title": "K-loop Unroll x8",
+              "conflict_group": "k_loop_unroll_factor",
+              "search_mode": "conflict_expand",
+              "principle": "将 GEMM 内部 K 维计算循环按 8 次迭代进行展开，减少循环控制指令和分支开销，同时暴露更多彼此独立的 FMA 指令，使编译器能够进行更充分的指令调度并提高指令级并行度。",
+              "range": {
+                "unroll_factor": 8,
+                "recommended_BK": [
+                  8,
+                  16,
+                  32,
+                  64,
+                  128
+                ],
+                "preferred_condition": "BK % 8 == 0",
+                "fallback_condition": "BK % 8 != 0 requires remainder handling"
+              },
+              "how_to_optimize": "将原本逐 k 执行的 K-tile 内部计算循环以 8 为步长展开。每轮同时处理 k, k+1, ..., k+7 对应的 A/B 元素，并对线程负责的全部 accumulator 进行连续 FMA 更新。优先在 BK 能被 8 整除时使用；若 BK 不能被 8 整除，则主体部分使用 Unroll8，剩余 K 元素使用标量 remainder loop。",
+              "implementation_expansion": "将 K-tile 内层循环由 for (int k = 0; k < BK; ++k) 改写为以 8 为展开因子的计算结构。对于每个展开位置 u=0..7，从 shared memory 或 register 中取得 A[k+u] 和 B[k+u]，并更新当前线程负责的 TM x TN accumulator。可以使用 #pragma unroll 8，或显式生成 8 组 load/FMA 指令。应保证所有 k+u 均处于当前有效 K tile 范围内；对于 K 或 BK 非 8 倍数的情况，需要额外 remainder 处理。",
+              "applicable_when": "适用于 BK 较大、K 维计算占比较高且寄存器资源允许的 SIMT FP32 GEMM。尤其适用于 BK=16、32、64 等能够被 8 整除的配置。",
+              "requires": [],
+              "excludes": [
+                "Reordering.KLoop.Unroll4"
+              ],
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": [
+                  {
+                    "id": "BK_AT_LEAST_8",
+                    "kind": "ir_predicate",
+                    "op": "ge",
+                    "lhs": {
+                      "field": "tiling.block_k"
+                    },
+                    "rhs": {
+                      "const": 8
+                    }
+                  },
+                  {
+                    "id": "PROBLEM_K_POSITIVE",
+                    "kind": "ir_predicate",
+                    "op": "gt",
+                    "lhs": {
+                      "field": "problem.K"
+                    },
+                    "rhs": {
+                      "const": 0
+                    }
+                  },
+                  {
+                    "id": "REGISTER_TILE_READY",
+                    "kind": "ir_predicate",
+                    "op": "eq",
+                    "lhs": {
+                      "field": "memory.use_register_tile"
+                    },
+                    "rhs": {
+                      "const": true
+                    }
+                  },
+                  {
+                    "id": "THREAD_OUTPUT_MAPPING_READY",
+                    "kind": "ir_predicate",
+                    "op": "is_not_null",
+                    "lhs": {
+                      "field": "mapping.thread_to_output"
+                    }
+                  }
+                ]
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "UNROLL_FACTOR_8_RECORDED",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "schedule.unrolling"
+                      },
+                      "rhs": {
+                        "const": "Unroll8"
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": [
+                    {
+                      "constraint_id": "C_K_REDUCTION_PRESERVED_UNROLL8",
+                      "verifiers": {
+                        "required": [
+                          "dynamic_reference_check"
+                        ],
+                        "best_effort": [
+                          "static_loop_domain_check"
+                        ]
+                      },
+                      "args": {
+                        "axis": "K",
+                        "unroll_factor": 8,
+                        "must_execute_each_original_k_once": true
+                      }
+                    }
+                  ]
+                }
+              },
+              "ir_updates": {
+                "schedule.unrolling": "Unroll8"
+              },
+              "affected_fields": [
+                "schedule.unrolling"
+              ],
+              "allowed_modified_regions": [
+                "MAIN_LOOP",
+                "COMPUTE_INNER"
+              ],
+              "resource_effects": {
+                "instruction_level_parallelism": "increase",
+                "loop_control_overhead": "decrease",
+                "register_pressure": "may increase",
+                "code_size": "increase",
+                "occupancy": "may decrease if register pressure becomes excessive"
+              },
+              "risk_level": "medium",
+              "priority": 80,
+              "maturity": "v1"
+            },
+            {
+              "strategy_id": "Reordering.KLoop.UnrollBK",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.KLoop.UnrollBK from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.KLoop.UnrollMicroK",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.KLoop.UnrollMicroK from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.WarpCompute.KOuterInnerSchedule",
+              "stage": "MappingReordering",
+              "category": "MappingReordering",
+              "subphase": "Reordering.ComputeSchedule",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.WarpCompute.KOuterInnerSchedule from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "memory.use_register_tile != null",
+                "mapping.thread_to_output != null"
+              ],
+              "postconditions": [
+                "schedule.unrolling != null",
+                "schedule.ffma != null",
+                "schedule.warp_compute != null",
+                "register.cache_A != null",
+                "register.cache_B != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "Vectorization",
+      "ordered_subphases": [
+        {
+          "subphase": "Vectorization.AlignmentPolicy",
+          "strategies": [
+            {
+              "strategy_id": "Safety.AssumeDivisibleAligned",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.AlignmentPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Safety.AssumeDivisibleAligned from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "vectorization.A.alignment_guard != null",
+                "vectorization.B.alignment_guard != null",
+                "vectorization.A.alignment_proven != null",
+                "vectorization.B.alignment_proven != null",
+                "safety.boundary_policy != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Safety.BoundaryPolicy.GeneralGuarded",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.AlignmentPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Safety.BoundaryPolicy.GeneralGuarded from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "vectorization.A.alignment_guard != null",
+                "vectorization.B.alignment_guard != null",
+                "vectorization.A.alignment_proven != null",
+                "vectorization.B.alignment_proven != null",
+                "safety.boundary_policy != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Safety.BoundaryPolicy.MaskLoad",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.AlignmentPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Safety.BoundaryPolicy.MaskLoad from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "vectorization.A.alignment_guard != null",
+                "vectorization.B.alignment_guard != null",
+                "vectorization.A.alignment_proven != null",
+                "vectorization.B.alignment_proven != null",
+                "safety.boundary_policy != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Safety.BoundaryPolicy.PaddingInput",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.AlignmentPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Safety.BoundaryPolicy.PaddingInput from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "vectorization.A.alignment_guard != null",
+                "vectorization.B.alignment_guard != null",
+                "vectorization.A.alignment_proven != null",
+                "vectorization.B.alignment_proven != null",
+                "safety.boundary_policy != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Safety.BoundaryPolicy.ScalarFallback",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.AlignmentPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Safety.BoundaryPolicy.ScalarFallback from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "vectorization.A.alignment_guard != null",
+                "vectorization.B.alignment_guard != null",
+                "vectorization.A.alignment_proven != null",
+                "vectorization.B.alignment_proven != null",
+                "safety.boundary_policy != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Safety.BoundaryPolicy.SeparateTailKernel",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.AlignmentPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Safety.BoundaryPolicy.SeparateTailKernel from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "vectorization.A.alignment_guard != null",
+                "vectorization.B.alignment_guard != null",
+                "vectorization.A.alignment_proven != null",
+                "vectorization.B.alignment_proven != null",
+                "safety.boundary_policy != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.AlignmentPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Safety.BoundaryPolicy.StaticDivisibleNoGuard from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "vectorization.A.alignment_guard != null",
+                "vectorization.B.alignment_guard != null",
+                "vectorization.A.alignment_proven != null",
+                "vectorization.B.alignment_proven != null",
+                "safety.boundary_policy != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.AlignmentGuard",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.AlignmentPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.AlignmentGuard from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "vectorization.A.alignment_guard != null",
+                "vectorization.B.alignment_guard != null",
+                "vectorization.A.alignment_proven != null",
+                "vectorization.B.alignment_proven != null",
+                "safety.boundary_policy != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Vectorization.LoadVectorization",
+          "strategies": [
+            {
+              "strategy_id": "Reordering.CooperativeVectorLoadAB.float4",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.LoadVectorization",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.CooperativeVectorLoadAB.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "alignment guard or alignment proof != null",
+                "tail handling or static divisible policy != null"
+              ],
+              "postconditions": [
+                "vectorization.A.vector_width != null",
+                "vectorization.B.vector_width != null",
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.WarpCooperativeLoadA.float4",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.LoadVectorization",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.WarpCooperativeLoadA.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "alignment guard or alignment proof != null",
+                "tail handling or static divisible policy != null"
+              ],
+              "postconditions": [
+                "vectorization.A.vector_width != null",
+                "vectorization.B.vector_width != null",
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.WarpCooperativeLoadAB.float4",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.LoadVectorization",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.WarpCooperativeLoadAB.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "alignment guard or alignment proof != null",
+                "tail handling or static divisible policy != null"
+              ],
+              "postconditions": [
+                "vectorization.A.vector_width != null",
+                "vectorization.B.vector_width != null",
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Reordering.WarpCooperativeLoadB.float4",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.LoadVectorization",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Reordering.WarpCooperativeLoadB.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "alignment guard or alignment proof != null",
+                "tail handling or static divisible policy != null"
+              ],
+              "postconditions": [
+                "vectorization.A.vector_width != null",
+                "vectorization.B.vector_width != null",
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.GlobalLoadA.float2",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.LoadVectorization",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.GlobalLoadA.float2 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "alignment guard or alignment proof != null",
+                "tail handling or static divisible policy != null"
+              ],
+              "postconditions": [
+                "vectorization.A.vector_width != null",
+                "vectorization.B.vector_width != null",
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.GlobalLoadAB.float4",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.LoadVectorization",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.GlobalLoadAB.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "alignment guard or alignment proof != null",
+                "tail handling or static divisible policy != null"
+              ],
+              "postconditions": [
+                "vectorization.A.vector_width != null",
+                "vectorization.B.vector_width != null",
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.GlobalLoadB.float2",
+              "stage": "Vectorization",
+              "category": "Vectorization",
+              "subphase": "Vectorization.LoadVectorization",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.GlobalLoadB.float2 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "alignment guard or alignment proof != null",
+                "tail handling or static divisible policy != null"
+              ],
+              "postconditions": [
+                "vectorization.A.vector_width != null",
+                "vectorization.B.vector_width != null",
+                "memory.global_load_A.pattern != null",
+                "memory.global_load_B.pattern != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Vectorization.StoreVectorization",
+          "strategies": []
+        }
+      ]
+    },
+    {
+      "stage_id": "Pipeline",
+      "ordered_subphases": [
+        {
+          "subphase": "Pipeline.ResourcePrecheck",
+          "strategies": []
+        },
+        {
+          "subphase": "Pipeline.BufferingSelection",
+          "strategies": [
+            {
+              "strategy_id": "Pipeline.DoubleBuffer.SharedAB",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.BufferingSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Pipeline.DoubleBuffer.SharedAB from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "resource.shared_memory.total_bytes != null"
+              ],
+              "postconditions": [
+                "pipeline.enabled != null",
+                "pipeline.stage_count != null",
+                "pipeline.double_buffering != null",
+                "resource.shared_memory.pipeline_multiplier != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.BufferingSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Pipeline.DoubleBuffer.SharedAB.V1Enabled from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "resource.shared_memory.total_bytes != null"
+              ],
+              "postconditions": [
+                "pipeline.enabled != null",
+                "pipeline.stage_count != null",
+                "pipeline.double_buffering != null",
+                "resource.shared_memory.pipeline_multiplier != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Pipeline.NoAsyncCopy.V1",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.BufferingSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Pipeline.NoAsyncCopy.V1 from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "resource.shared_memory.total_bytes != null"
+              ],
+              "postconditions": [
+                "pipeline.enabled != null",
+                "pipeline.stage_count != null",
+                "pipeline.double_buffering != null",
+                "resource.shared_memory.pipeline_multiplier != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.BufferingSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Pipeline.WarpAwareDoubleBuffer.SharedAB from strategy_index allowed_strategy_ids.",
+              "preconditions": [
+                "resource.shared_memory.total_bytes != null"
+              ],
+              "postconditions": [
+                "pipeline.enabled != null",
+                "pipeline.stage_count != null",
+                "pipeline.double_buffering != null",
+                "resource.shared_memory.pipeline_multiplier != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Pipeline.PrefetchSelection",
+          "strategies": [
+            {
+              "strategy_id": "Memory.Prefetch.GlobalToRegisterA",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.PrefetchSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Memory.Prefetch.GlobalToRegisterA from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "pipeline.prefetch != null",
+                "resource.register != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Memory.Prefetch.GlobalToRegisterB",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.PrefetchSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Memory.Prefetch.GlobalToRegisterB from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "pipeline.prefetch != null",
+                "resource.register != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Pipeline.WarpRegisterPrefetchAB",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.PrefetchSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Pipeline.WarpRegisterPrefetchAB from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "pipeline.prefetch != null",
+                "resource.register != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Pipeline.LargeMatrixScheduling",
+          "strategies": [
+            {
+              "strategy_id": "Mapping.CTASwizzle.GroupedN",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.LargeMatrixScheduling",
+              "name": "Mapping.CTASwizzle.GroupedN",
+              "title": "Mapping CTASwizzle GroupedN",
+              "principle": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+              "applicable_when": "problem.size_class is large_square or K intensity is high.",
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": []
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "POST_1",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "scheduling.cta_swizzle"
+                      },
+                      "rhs": {
+                        "const": "GroupedN"
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": []
+                }
+              },
+              "ir_updates": {
+                "scheduling.cta_swizzle": "GroupedN"
+              },
+              "affected_fields": [
+                "scheduling.cta_swizzle"
+              ],
+              "allowed_modified_regions": [
+                "LAUNCH_CONFIG"
+              ],
+              "resource_effects": {
+                "l2_reuse": "may increase",
+                "wave_quantization": "may improve",
+                "grid_scheduling": "changes"
+              },
+              "risk_level": "medium",
+              "priority": 75,
+              "maturity": "v1"
+            },
+            {
+              "strategy_id": "Mapping.CTASwizzle.GroupedM",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.LargeMatrixScheduling",
+              "name": "Mapping.CTASwizzle.GroupedM",
+              "title": "Mapping CTASwizzle GroupedM",
+              "principle": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+              "applicable_when": "problem.size_class is large_square or K intensity is high.",
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": []
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "POST_1",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "scheduling.cta_swizzle"
+                      },
+                      "rhs": {
+                        "const": "GroupedM"
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": []
+                }
+              },
+              "ir_updates": {
+                "scheduling.cta_swizzle": "GroupedM"
+              },
+              "affected_fields": [
+                "scheduling.cta_swizzle"
+              ],
+              "allowed_modified_regions": [
+                "LAUNCH_CONFIG"
+              ],
+              "resource_effects": {
+                "l2_reuse": "may increase",
+                "wave_quantization": "may improve",
+                "grid_scheduling": "changes"
+              },
+              "risk_level": "medium",
+              "priority": 75,
+              "maturity": "v1"
+            },
+            {
+              "strategy_id": "Memory.L2Reuse.CTASwizzleGroupedN",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.LargeMatrixScheduling",
+              "name": "Memory.L2Reuse.CTASwizzleGroupedN",
+              "title": "Memory L2Reuse CTASwizzleGroupedN",
+              "principle": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+              "applicable_when": "problem.size_class is large_square or K intensity is high.",
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": []
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "POST_1",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "memory.l2_reuse_policy"
+                      },
+                      "rhs": {
+                        "const": "CTASwizzleGroupedN"
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": []
+                }
+              },
+              "ir_updates": {
+                "memory.l2_reuse_policy": "CTASwizzleGroupedN"
+              },
+              "affected_fields": [
+                "memory.l2_reuse_policy"
+              ],
+              "allowed_modified_regions": [
+                "LAUNCH_CONFIG"
+              ],
+              "resource_effects": {
+                "l2_reuse": "may increase",
+                "wave_quantization": "may improve",
+                "grid_scheduling": "changes"
+              },
+              "risk_level": "medium",
+              "priority": 75,
+              "maturity": "v1"
+            },
+            {
+              "strategy_id": "Memory.L2Reuse.CTASwizzleGroupedM",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.LargeMatrixScheduling",
+              "name": "Memory.L2Reuse.CTASwizzleGroupedM",
+              "title": "Memory L2Reuse CTASwizzleGroupedM",
+              "principle": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+              "applicable_when": "problem.size_class is large_square or K intensity is high.",
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": []
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "POST_1",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "memory.l2_reuse_policy"
+                      },
+                      "rhs": {
+                        "const": "CTASwizzleGroupedM"
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": []
+                }
+              },
+              "ir_updates": {
+                "memory.l2_reuse_policy": "CTASwizzleGroupedM"
+              },
+              "affected_fields": [
+                "memory.l2_reuse_policy"
+              ],
+              "allowed_modified_regions": [
+                "LAUNCH_CONFIG"
+              ],
+              "resource_effects": {
+                "l2_reuse": "may increase",
+                "wave_quantization": "may improve",
+                "grid_scheduling": "changes"
+              },
+              "risk_level": "medium",
+              "priority": 75,
+              "maturity": "v1"
+            },
+            {
+              "strategy_id": "Scheduling.PersistentCTA.StaticTileLoop",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.LargeMatrixScheduling",
+              "name": "Scheduling.PersistentCTA.StaticTileLoop",
+              "title": "Scheduling PersistentCTA StaticTileLoop",
+              "principle": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+              "applicable_when": "problem.size_class is large_square or K intensity is high.",
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": []
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "POST_1",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "scheduling.persistent_cta"
+                      },
+                      "rhs": {
+                        "const": "StaticTileLoop"
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": []
+                }
+              },
+              "ir_updates": {
+                "scheduling.persistent_cta": "StaticTileLoop"
+              },
+              "affected_fields": [
+                "scheduling.persistent_cta"
+              ],
+              "allowed_modified_regions": [
+                "LAUNCH_CONFIG"
+              ],
+              "resource_effects": {
+                "l2_reuse": "may increase",
+                "wave_quantization": "may improve",
+                "grid_scheduling": "changes"
+              },
+              "risk_level": "medium",
+              "priority": 75,
+              "maturity": "v1"
+            },
+            {
+              "strategy_id": "Reduction.StreamK.WorkDecomposition",
+              "stage": "Pipeline",
+              "category": "Pipeline",
+              "subphase": "Pipeline.LargeMatrixScheduling",
+              "name": "Reduction.StreamK.WorkDecomposition",
+              "title": "Reduction StreamK WorkDecomposition",
+              "principle": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+              "applicable_when": "problem.size_class is large_square or K intensity is high.",
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": []
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "POST_1",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "scheduling.work_decomposition"
+                      },
+                      "rhs": {
+                        "const": "stream_k"
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": []
+                }
+              },
+              "ir_updates": {
+                "scheduling.work_decomposition": "stream_k"
+              },
+              "affected_fields": [
+                "scheduling.work_decomposition"
+              ],
+              "allowed_modified_regions": [
+                "LAUNCH_CONFIG"
+              ],
+              "resource_effects": {
+                "l2_reuse": "may increase",
+                "wave_quantization": "may improve",
+                "grid_scheduling": "changes"
+              },
+              "risk_level": "medium",
+              "priority": 75,
+              "maturity": "v1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "Epilogue",
+      "ordered_subphases": [
+        {
+          "subphase": "Epilogue.AlphaBetaPolicy",
+          "strategies": [
+            {
+              "strategy_id": "Epilogue.AlphaBeta.General",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.AlphaBetaPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.AlphaBeta.General from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "epilogue.mode != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Epilogue.BetaOne.FastPath",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.AlphaBetaPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.BetaOne.FastPath from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "epilogue.mode != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Epilogue.BetaZero.FastPath",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.AlphaBetaPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.BetaZero.FastPath from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "epilogue.mode != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Epilogue.FusionPolicy",
+          "strategies": [
+            {
+              "strategy_id": "Epilogue.Fusion.Bias",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.FusionPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.Fusion.Bias from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "epilogue.fusion != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Epilogue.Fusion.GELU",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.FusionPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.Fusion.GELU from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "epilogue.fusion != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Epilogue.Fusion.ReLU",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.FusionPolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.Fusion.ReLU from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "epilogue.fusion != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Epilogue.StorePolicy",
+          "strategies": [
+            {
+              "strategy_id": "Epilogue.StoreC.CoalescedScalar",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.StoreC.CoalescedScalar from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Epilogue.StoreC.Vectorized.float2",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.StoreC.Vectorized.float2 from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Epilogue.StoreC.Vectorized.float4",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Epilogue.StoreC.Vectorized.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Mapping.WarpStore.CoalescedC",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Mapping.WarpStore.CoalescedC from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.StoreC.AlignedNoGuard",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.StoreC.AlignedNoGuard from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.StoreC.GuardedVectorStore",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.StoreC.GuardedVectorStore from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.StoreC.SafeScalar",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.StoreC.SafeScalar from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.StoreC.float2",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.StoreC.float2 from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Vectorization.StoreC.float4",
+              "stage": "Epilogue",
+              "category": "Epilogue",
+              "subphase": "Epilogue.StorePolicy",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Vectorization.StoreC.float4 from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "memory.global_store_C.pattern != null",
+                "vectorization.C.vector_width != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "Compiler",
+      "ordered_subphases": [
+        {
+          "subphase": "Compiler.AttributeSelection",
+          "strategies": [
+            {
+              "strategy_id": "Compiler.FastMath.Enabled",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.AttributeSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Compiler.FastMath.Enabled from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "compiler.attributes != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Compiler.ForceInline.DeviceFunctions",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.AttributeSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Compiler.ForceInline.DeviceFunctions from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "compiler.attributes != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Compiler.LaunchBounds.MaxThreads",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.AttributeSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Compiler.LaunchBounds.MaxThreads from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "compiler.attributes != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Compiler.LaunchBounds.MinBlocksPerSM",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.AttributeSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Compiler.LaunchBounds.MinBlocksPerSM from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "compiler.attributes != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Compiler.RestrictPointer",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.AttributeSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Compiler.RestrictPointer from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "compiler.attributes != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Compiler.TemplateSpecialization.ShapeStatic",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.AttributeSelection",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Compiler.TemplateSpecialization.ShapeStatic from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "compiler.attributes != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        },
+        {
+          "subphase": "Compiler.ResourceTuning",
+          "strategies": [
+            {
+              "strategy_id": "Compiler.Ptxas.MaxRegisterCount",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.ResourceTuning",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Compiler.Ptxas.MaxRegisterCount from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "resource.register.final != null",
+                "resource.occupancy.final != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            },
+            {
+              "strategy_id": "Scheduling.WaveQuantization.SMResidentBlocks",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.ResourceTuning",
+              "name": "Scheduling.WaveQuantization.SMResidentBlocks",
+              "title": "Scheduling WaveQuantization SMResidentBlocks",
+              "principle": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+              "applicable_when": "problem.size_class is large_square or K intensity is high.",
+              "preconditions": {
+                "verifier": "ir_predicate_eval",
+                "predicates": []
+              },
+              "postconditions": {
+                "patch_ir_verification": {
+                  "verifier": "ir_predicate_eval",
+                  "predicates": [
+                    {
+                      "id": "POST_1",
+                      "kind": "ir_predicate",
+                      "op": "eq",
+                      "lhs": {
+                        "field": "scheduling.wave_quantization"
+                      },
+                      "rhs": {
+                        "const": true
+                      }
+                    }
+                  ]
+                },
+                "code_verification": {
+                  "constraints": []
+                }
+              },
+              "ir_updates": {
+                "scheduling.wave_quantization": true
+              },
+              "affected_fields": [
+                "scheduling.wave_quantization"
+              ],
+              "allowed_modified_regions": [
+                "LAUNCH_CONFIG"
+              ],
+              "resource_effects": {
+                "l2_reuse": "may increase",
+                "wave_quantization": "may improve",
+                "grid_scheduling": "changes"
+              },
+              "risk_level": "medium",
+              "priority": 75,
+              "maturity": "v1"
+            },
+            {
+              "strategy_id": "Tuning.WarpOccupancyBalance",
+              "stage": "Compiler",
+              "category": "Compiler",
+              "subphase": "Compiler.ResourceTuning",
+              "maturity": "v1",
+              "principle": "Synthesized library entry for Tuning.WarpOccupancyBalance from strategy_index allowed_strategy_ids.",
+              "preconditions": [],
+              "postconditions": [
+                "resource.register.final != null",
+                "resource.occupancy.final != null"
+              ],
+              "ir_updates": {},
+              "priority": 50,
+              "synthesized_from_index": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

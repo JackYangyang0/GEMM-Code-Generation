@@ -1,0 +1,47 @@
+{
+  "schema_name": "SGPO Stage-Oriented Strategy Workflow Schema",
+  "schema_version": "7.0",
+  "core_change": "A strategy is not always a fully verifiable optimization unit. Some strategies are construction steps inside a stage. Stage-level verification is executed only after all required subphases are resolved.",
+  "concepts": {
+    "micro_strategy": {
+      "description": "A local construction/refinement step such as choosing BM/BN/BK, WM/WN, or TM/TN.",
+      "verification": "Only local field checks and dependency checks; no full semantic/resource verification unless enough fields are available."
+    },
+    "stage": {
+      "description": "A complete GEMM construction phase such as Tiling, Layout, Mapping, Reordering, Vectorization, Pipeline, Epilogue.",
+      "verification": "Stage-level post verification after all required fields of the stage are resolved."
+    },
+    "stage_plan": {
+      "description": "An ordered list of micro-strategies selected within one stage."
+    },
+    "derived_fields": {
+      "description": "Fields computed after subphase completion, e.g. warps_per_block, threads_per_block, shared_memory_bytes."
+    }
+  },
+  "strategy_object_required_changes": {
+    "old_problem": "preconditions/postconditions were attached to each strategy as if every strategy were independently and immediately verifiable.",
+    "new_design": {
+      "micro_strategy_fields": [
+        "strategy_id",
+        "stage",
+        "subphase",
+        "role",
+        "requires_fields",
+        "provides_fields",
+        "local_preconditions",
+        "local_postconditions",
+        "ir_updates",
+        "allowed_modified_regions",
+        "next_allowed_subphases"
+      ],
+      "stage_fields": [
+        "stage_id",
+        "ordered_subphases",
+        "required_fields_for_stage_completion",
+        "derived_fields",
+        "stage_completion_predicates",
+        "stage_post_verification"
+      ]
+    }
+  }
+}
