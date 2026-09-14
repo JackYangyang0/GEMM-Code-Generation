@@ -21,9 +21,19 @@ DEFAULT_PROMPT = ROOT / "llm" / "prompts" / "generate_concrete_code_prompt.txt"
 DEFAULT_CONFIG = ROOT / "conf.yaml"
 DEFAULT_OUTPUT = ROOT / "results" / "code" / "patched_code_files.json"
 ALLOWED_CODE_FILES = {
-    "main.cpp",
     "cuda_kernel.cuh",
     "kernel.h",
+}
+CUDA_PATCH_REGIONS = {
+    "LAUNCH_CONFIG",
+    "SHARED_DECL",
+    "INDEX_MAPPING",
+    "REGISTER_DECL",
+    "GLOBAL_TO_SHARED_LOAD",
+    "SYNC_AFTER_LOAD",
+    "MAIN_LOOP",
+    "COMPUTE_INNER",
+    "STORE",
 }
 
 
@@ -95,7 +105,7 @@ def build_patch_to_code_messages(
     return [
         {
             "role": "system",
-            "content": "You apply SGPO Patch JSON to local CUDA/C++ source files and only return valid JSON.",
+            "content": "You apply SGPO Patch JSON as local CUDA anchor-region edits and only return compact valid JSON.",
         },
         {"role": "user", "content": prompt},
     ]
@@ -160,10 +170,11 @@ def validate_generated_code_files_response(
             f"Concrete code strategy_id mismatch: expected {expected_strategy_id}, got {strategy_id}"
         )
     files = response.get("files")
-    if not isinstance(files, list) or not files:
-        raise ValueError("Concrete code response must include a non-empty files list.")
+    edits = response.get("edits")
+    if (not isinstance(files, list) or not files) and (not isinstance(edits, list) or not edits):
+        raise ValueError("Concrete code response must include a non-empty edits list or legacy files list.")
     seen = set()
-    for item in files:
+    for item in files or []:
         if not isinstance(item, dict):
             raise ValueError("Each concrete code file item must be an object.")
         relative_path = item.get("path")
@@ -175,9 +186,31 @@ def validate_generated_code_files_response(
         if not isinstance(content, str) or not content.strip():
             raise ValueError(f"Concrete code file content is empty: {relative_path}")
         seen.add(relative_path)
+    seen_edits = set()
+    for item in edits or []:
+        if not isinstance(item, dict):
+            raise ValueError("Each concrete code edit item must be an object.")
+        relative_path = item.get("path")
+        region = normalize_region_name(item.get("region") or item.get("anchor"))
+        replacement = normalize_edit_replacement(item)
+        if relative_path not in ALLOWED_CODE_FILES:
+            raise ValueError(f"Concrete code edit file is not allowed: {relative_path}")
+        if relative_path != "cuda_kernel.cuh":
+            raise ValueError(f"GPU region edits are only supported for cuda_kernel.cuh: {relative_path}")
+        if region not in CUDA_PATCH_REGIONS:
+            raise ValueError(f"Concrete code edit region is not supported: {item.get('region') or item.get('anchor')}")
+        key = (relative_path, region)
+        if key in seen_edits:
+            raise ValueError(f"Duplicate concrete code edit for {relative_path}:{region}")
+        if not isinstance(replacement, str) or not replacement.strip():
+            raise ValueError(f"Concrete code edit replacement is empty: {relative_path}:{region}")
+        item["path"] = relative_path
+        item["region"] = region
+        item["replacement"] = replacement
+        seen_edits.add(key)
     response.setdefault("code_generation_notes", [])
     response.setdefault("expected_static_properties", [])
-    response["generation_method"] = "patch_json_plus_source_files"
+    response["generation_method"] = "cuda_region_edits" if edits else "patch_json_plus_source_files"
     if patch_file is not None:
         response["source_patch_file"] = str(patch_file)
     response["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
@@ -209,7 +242,21 @@ def apply_generated_code_files(
     patch_ir: dict[str, Any] | None = None,
     strategy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if generated_code.get("edits"):
+        return apply_generated_region_edits(generated_code, code_root, patch_ir or {}, strategy or {})
+
+    if (strategy or {}).get("patch_contract", {}).get("region_edits_only"):
+        return {"status": "fail", "applied": [],
+                "error_message": "This strategy requires local region edits; full source files are forbidden"}
+
     ensure_generated_code_has_minimal_kernel(generated_code)
+    from SGPO.verification.cuda_launch_config import configure_shared_launch
+    try:
+        for item in generated_code.get("files", []):
+            if item.get("path") == "cuda_kernel.cuh":
+                item["content"] = configure_shared_launch(item["content"], patch_ir or {})
+    except ValueError as exc:
+        return {"status": "fail", "applied": [], "error_message": str(exc)}
     materialization = validate_generated_code_materialization(generated_code, patch_ir or {}, strategy or {})
     if materialization["status"] != "pass":
         return {
@@ -246,11 +293,189 @@ def apply_generated_code_files(
     }
 
 
+def apply_generated_region_edits(
+    generated_code: dict[str, Any],
+    code_root: Path,
+    patch_ir: dict[str, Any],
+    strategy: dict[str, Any],
+) -> dict[str, Any]:
+    applied = []
+    staged_content: dict[str, str] = {}
+    original_content: dict[str, str] = {}
+    contract = strategy.get("patch_contract") or {}
+    edited_spans: dict[str, list[tuple[int, int]]] = {}
+    root = code_root.resolve()
+    for item in generated_code.get("edits", []) or []:
+        relative_path = item["path"]
+        if contract and (relative_path != "cuda_kernel.cuh" or item["region"] not in contract["allowed_regions"]):
+            return {"status": "fail", "applied": [],
+                    "error_message": f"Strategy patch changes protected region: {relative_path}:{item['region']}"}
+        if relative_path not in ALLOWED_CODE_FILES:
+            return {"status": "fail", "error_message": f"Concrete code edit file is not allowed: {relative_path}", "applied": applied}
+        path = (code_root / relative_path).resolve()
+        if root not in [path, *path.parents]:
+            return {"status": "fail", "error_message": f"Concrete code edit file escapes code_root: {relative_path}", "applied": applied}
+        content = staged_content.get(relative_path)
+        if content is None:
+            content = path.read_text(encoding="utf-8")
+            original_content[relative_path] = content
+        if contract:
+            original = original_content[relative_path]
+            start = original.find(f"{item['region']}_BEGIN")
+            end = original.find(f"{item['region']}_END", start)
+            if start < 0 or end < 0:
+                return {"status": "fail", "applied": [], "error_message": f"Missing original anchor {item['region']}"}
+            spans = edited_spans.setdefault(relative_path, [])
+            if any(start <= previous_end and previous_start <= end for previous_start, previous_end in spans):
+                return {"status": "fail", "applied": [], "error_message": "Overlapping parent/child region edits are forbidden"}
+            spans.append((start, end))
+        try:
+            content = replace_cuda_anchor_region(content, item["region"], item["replacement"])
+        except Exception as exc:
+            return {
+                "status": "fail",
+                "error_message": f"Failed to apply region edit {relative_path}:{item['region']}: {exc}",
+                "method": "cuda_region_edits",
+                "applied": applied,
+            }
+        staged_content[relative_path] = content
+        applied.append(
+            {
+                "file": relative_path,
+                "region": item["region"],
+                "change_summary": item.get("change_summary"),
+                "method": "anchor_replacement",
+            }
+        )
+
+    validation_payload = {
+        "strategy_id": generated_code.get("strategy_id"),
+        "files": [
+            {"path": relative_path, "content": content, "change_summary": "staged region edits"}
+            for relative_path, content in staged_content.items()
+        ],
+    }
+    if not contract:
+        ensure_generated_code_has_minimal_kernel(validation_payload)
+    for item in validation_payload["files"]:
+        staged_content[item["path"]] = item["content"]
+    if contract:
+        for relative_path, content in staged_content.items():
+            original = original_content[relative_path]
+            for region in contract.get("preserved_regions", []):
+                if anchor_region(original, region) != anchor_region(content, region):
+                    return {"status": "fail", "applied": [],
+                            "error_message": f"Strategy patch modified protected {region}"}
+            before = strip_cpp_comments(original)
+            after = strip_cpp_comments(content)
+            for marker in re.findall(r"\b[A-Z_]+_(?:BEGIN|END)\b", content):
+                if content.count(marker) > max(1, original.count(marker)):
+                    return {"status": "fail", "applied": [], "error_message": f"Patch introduced duplicate anchor {marker}"}
+            if after.count("__shared__") != before.count("__shared__"):
+                return {"status": "fail", "applied": [], "error_message": "Strategy cannot add or remove shared buffers"}
+            if re.search(r"\b(?:float4|FLOAT4)\b", after) and not re.search(r"\b(?:float4|FLOAT4)\b", before):
+                return {"status": "fail", "applied": [], "error_message": "Strategy cannot introduce float4 vectorization"}
+    from SGPO.verification.cuda_launch_config import configure_shared_launch
+    try:
+        for item in validation_payload["files"]:
+            if item["path"] == "cuda_kernel.cuh":
+                item["content"] = configure_shared_launch(item["content"], patch_ir)
+                staged_content[item["path"]] = item["content"]
+    except ValueError as exc:
+        return {"status": "fail", "applied": [], "error_message": str(exc)}
+    materialization = validate_generated_code_materialization(validation_payload, patch_ir, strategy)
+    if materialization["status"] != "pass":
+        return {
+            "status": "fail",
+            "error_message": materialization["error_message"],
+            "method": "cuda_region_edits",
+            "applied": applied,
+            "materialization": materialization,
+        }
+
+    for relative_path, content in staged_content.items():
+        (code_root / relative_path).write_text(content, encoding="utf-8")
+    generated_code["materialized_files"] = [
+        {"path": relative_path, "content": content, "change_summary": "Materialized from region edits."}
+        for relative_path, content in staged_content.items()
+    ]
+    return {
+        "status": "pass",
+        "method": "cuda_region_edits",
+        "applied": applied,
+        "materialization": materialization,
+    }
+
+
 def apply_concrete_code(
     concrete_code: dict[str, Any],
     code_root: Path = DEFAULT_CODE_ROOT,
 ) -> dict[str, Any]:
     return apply_generated_code_files(concrete_code, code_root)
+
+
+def normalize_edit_replacement(item: dict[str, Any]) -> str | None:
+    replacement = item.get("replacement")
+    if isinstance(replacement, str):
+        return replacement
+    replacement_lines = item.get("replacement_lines")
+    if isinstance(replacement_lines, list) and all(isinstance(line, str) for line in replacement_lines):
+        return "\n".join(replacement_lines)
+    return None
+
+
+def normalize_region_name(region: Any) -> str:
+    text = str(region or "").strip()
+    text = text.replace("_BEGIN", "").replace("_END", "")
+    for candidate in CUDA_PATCH_REGIONS:
+        if candidate in text:
+            return candidate
+    return text
+
+
+def replace_cuda_anchor_region(content: str, region: str, replacement: str) -> str:
+    lines = content.splitlines()
+    begin_marker = f"{region}_BEGIN"
+    end_marker = f"{region}_END"
+    if sum(begin_marker in line for line in lines) > 1 or sum(end_marker in line for line in lines) > 1:
+        raise ValueError(f"ambiguous duplicate anchor: {region}; edit a unique enclosing region covering all occurrences")
+    begin_index = next((i for i, line in enumerate(lines) if begin_marker in line), None)
+    end_index = next((i for i, line in enumerate(lines) if end_marker in line and begin_index is not None and i > begin_index), None)
+    if begin_index is None or end_index is None:
+        raise ValueError(f"anchor region not found: {region}")
+
+    body_start = begin_index + 1
+    while body_start < end_index and "*/" not in lines[body_start]:
+        body_start += 1
+    if body_start < end_index and "*/" in lines[body_start]:
+        body_start += 1
+
+    end_open_index = find_region_end_open(lines, body_start, end_index)
+    body_end = end_open_index if end_open_index is not None else end_index
+
+    indent = ""
+    if body_start < len(lines):
+        match = re.match(r"^(\s*)", lines[body_start])
+        indent = match.group(1) if match else ""
+    replacement_lines = replacement.strip("\n").splitlines()
+    indented = [f"{indent}{line}" if line else "" for line in replacement_lines]
+    suffix = lines[body_end:]
+    if end_open_index is None:
+        suffix = [f"{indent}/*"] + suffix
+    updated = lines[:body_start] + indented + suffix
+    trailing = "\n" if content.endswith(("\n", "\r\n")) else ""
+    return "\n".join(updated) + trailing
+
+
+def find_region_end_open(lines: list[str], body_start: int, end_index: int) -> int | None:
+    for index in range(end_index - 1, body_start - 1, -1):
+        stripped = lines[index].strip()
+        if not stripped:
+            continue
+        if re.match(r"^/\*", stripped):
+            return index
+        return None
+    return None
 
 
 def ensure_generated_code_has_minimal_kernel(generated_code: dict[str, Any]) -> None:
@@ -340,7 +565,10 @@ def validate_generated_code_materialization(
         if not (has_a and has_b):
             failures.append("Shared-memory strategy requires real __shared__ float A/B buffers.")
 
-    if compute_strategy(strategy_id) and not re.search(r"\+=\s*[^;]*\*\s*[^;]*;", code_only):
+    if compute_strategy(strategy_id) and not (
+        re.search(r"\+=\s*[^;]*\*\s*[^;]*;", code_only)
+        or re.search(r"\b(?:fmaf|__fmaf_rn)\s*\(", code_only)
+    ):
         failures.append("Compute/reordering strategy must materialize a multiply-accumulate statement.")
 
     if store_strategy(strategy_id) and not re.search(r"\bC\s*\[[^\]]+\]\s*=", code_only):

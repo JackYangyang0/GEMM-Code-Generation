@@ -1,11 +1,11 @@
 {
   "graph_name": "SGPO Stage-Oriented Strategy Invocation Graph",
-  "graph_version": "7.0",
-  "core_principle": "Strategies are invoked as stage-internal micro-strategies. A micro-strategy may only update local OptIR fields and pass local checks. Full code-level and semantic verification is executed after the stage is complete.",
+  "graph_version": "8.1",
+  "core_principle": "Stage-oriented construction followed by size-aware performance unlock. Performance strategies carry explicit IR prerequisites, hard conflicts, and rollback fallbacks.",
   "global_flow": [
     "Spec",
     "OptIR_Init",
-    "StageController",
+    "Phase1_StageController",
     "TilingStage",
     "LayoutStage",
     "MappingReorderingStage",
@@ -13,7 +13,11 @@
     "PipelineStage",
     "EpilogueStage",
     "CompilerStage",
-    "FinalVerification",
+    "Phase1Verification",
+    "Phase1Top3",
+    "MatrixProfile",
+    "Phase2BatchUnlock",
+    "UnifiedTop3Ranking",
     "AcceptKernel"
   ],
   "execution_policy": {

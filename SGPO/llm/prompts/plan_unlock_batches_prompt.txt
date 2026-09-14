@@ -1,0 +1,51 @@
+You are planning Phase 2 performance-unlock batches for SGPO GPU GEMM.
+
+Goal:
+Plan a small ordered set of strategy batches for the already-correct kernel.
+Put tightly coupled strategies in the same batch when they modify the same code regions or depend on the same IR fields.
+It is valid to select zero strategies if no safe unlock is useful.
+
+Inputs:
+User request:
+{user_question}
+
+Filtered candidate strategy index:
+{strategy_index_json}
+
+Current OptIR summary:
+{optir_summary}
+
+Current code summary:
+{code_summary}
+
+Matrix profile:
+{matrix_profile}
+
+Verifier/profile summary:
+{verification_summary}
+
+Rules:
+- Only use strategy ids present in the filtered candidate strategy index.
+- The code summary is intentionally compressed. Do not ask for full source code at batch planning time.
+- Plan using only: already-used strategies, tile configuration, shared-memory usage, register estimate, float4/double-buffer/boundary-guard flags, current GFLOPS/latency, and recent defect summary.
+- Prefer batches that are locally meaningful and repairable.
+- If register pressure is high, avoid or isolate prefetch/unroll/register-cache strategies.
+- If shared memory is close to the limit, avoid or isolate double-buffer strategies.
+- If the verifier summary shows indexing/sync/correctness defects, prefer repair-safe or fallback strategies and avoid stacking aggressive strategies.
+- For small/medium matrices, do not include large-matrix-only ideas.
+- Keep the output short. Do not explain outside JSON.
+
+Return only this JSON object:
+{{
+  "batch_order": ["batch_1"],
+  "batches": [
+    {{
+      "batch_id": "batch_1",
+      "purpose": "short purpose",
+      "strategy_ids": ["Strategy.Id"],
+      "coupling_reason": "same code regions and IR fields",
+      "requires_summary": ["short requirement"],
+      "risk": "low"
+    }}
+  ]
+}}

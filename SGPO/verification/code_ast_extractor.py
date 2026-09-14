@@ -14,9 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CODE_ROOT = ROOT / "gemm_code" / "skeleton"
 DEFAULT_OUTPUT = ROOT / "results" / "code" / "code_ast.json"
 DEFAULT_CODE_FILES = [
-    "main.cpp",
     "cuda_kernel.cuh",
-    "kernel.h",
 ]
 
 
@@ -50,6 +48,21 @@ def extract_file_ast(relative_path: str, content: str) -> dict[str, Any]:
         "shared_memory": extract_shared_memory(content),
         "synchronization": extract_synchronization(content),
         "vector_types": extract_vector_types(content),
+        "async_copy": extract_async_copy_evidence(content),
+    }
+
+
+def extract_async_copy_evidence(content: str) -> dict[str, bool]:
+    # Preserve PTX string literals while discarding comments containing examples.
+    tokens = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/',
+                    lambda m: m.group(0) if m.group(0).startswith('"') else " ", content)
+    cuda_pipeline = "memcpy_async" in tokens and "producer_commit" in tokens
+    group_copy = "memcpy_async" in tokens and bool(re.search(r"(?:cooperative_groups|cg)::wait\s*\(", tokens))
+    return {
+        "copy": bool(re.search(r"cp\.async\.(?:ca|cg)\.shared\.global|\bmemcpy_async\s*\(|__pipeline_memcpy_async\s*\(", tokens)),
+        "commit": "cp.async.commit_group" in tokens or cuda_pipeline or group_copy or "__pipeline_commit" in tokens,
+        "wait": "cp.async.wait_group" in tokens or "cp.async.wait_all" in tokens
+                or "consumer_wait" in tokens or group_copy or "__pipeline_wait_prior" in tokens,
     }
 
 

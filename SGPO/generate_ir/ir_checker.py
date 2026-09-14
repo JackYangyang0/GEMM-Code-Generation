@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from SGPO.utils.common_utils import load_json, save_json
+from SGPO.generate_ir.gpu_resources import shared_memory_limit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +148,32 @@ def evaluate_code_constraint(ir_after: dict[str, Any], constraint: dict[str, Any
     best_effort = get_best_effort_code_verifiers(constraint)
     static_analysis = evaluate_best_effort_static_verifiers(ir_after, constraint, best_effort)
 
+    if len(required) > 1:
+        reports = []
+        for verifier in required:
+            single = copy.deepcopy(constraint)
+            single["verifiers"] = {"required": [verifier], "best_effort": best_effort}
+            reports.append(evaluate_code_constraint(ir_after, single))
+        detail = {"constraint": constraint, "required": required, "checks": serialize_results(reports)}
+        failed = next((item for item in reports if item.status == "fail"), None)
+        if failed:
+            return fail_result(check_id, failed.message, failed.failure_type, detail)
+        if any(item.status != "pass" for item in reports):
+            return unknown_result(check_id, "Required code verification is incomplete.", detail=detail)
+        return pass_result(check_id, "All required code verifiers passed.", detail=detail)
+
+    if "async_copy_evidence_check" in required:
+        evidence = [node.get("async_copy", {}) for node in
+                    (ir_after.get("code_ast", {}).get("files", {}) or {}).values()]
+        detail = {"constraint": constraint, "required": required, "evidence": evidence,
+                  "scope": "instruction/API presence only; not a synchronization proof"}
+        if any(item.get("copy") and item.get("wait") and item.get("commit") for item in evidence):
+            return pass_result(check_id, "Async copy and completion operations are present.", detail=detail)
+        if not evidence:
+            return unknown_result(check_id, "Async copy evidence has not been extracted.", detail=detail)
+        return fail_result(check_id, "Expected asynchronous copy/commit/wait evidence is missing.",
+                           "Pipeline.AsyncCopyProtocolMissing", detail)
+
     if "dynamic_reference_check" in required:
         correctness = ir_after.get("verification", {}).get("correctness", {})
         status = correctness.get("status")
@@ -184,12 +211,15 @@ def evaluate_code_constraint(ir_after: dict[str, Any], constraint: dict[str, Any
     if "runtime_safety_check" in required:
         runtime_safety = ir_after.get("verification", {}).get("runtime_safety", {})
         status = runtime_safety.get("status")
-        if status in {None, "pass"}:
+        if status == "pass":
             return pass_result(
                 check_id,
                 f"{constraint.get('constraint_id')} satisfied by runtime safety check.",
                 detail={"constraint": constraint, "required": required, "best_effort": best_effort, "runtime_safety": runtime_safety},
             )
+        if status != "fail":
+            return unknown_result(check_id, "Runtime safety verification has not passed.",
+                                  detail={"constraint": constraint, "required": required})
         return fail_result(
             check_id,
             f"{constraint.get('constraint_id')} failed runtime safety check.",
@@ -372,10 +402,10 @@ def infer_threads_per_block(ir: dict[str, Any]) -> int | None:
 
 def check_shared_memory_limit(ir: dict[str, Any]) -> CheckResult:
     used = estimate_shared_memory_bytes(ir)
-    limit = get_path(ir, "hardware.max_shared_memory_per_block_bytes")
+    limit = shared_memory_limit(ir)
     if used is None:
         return pass_result("C_SHARED_MEMORY_LIMIT", "shared memory is not enabled; limit check deferred.")
-    if limit is None:
+    if not limit:
         return fail_result(
             "C_SHARED_MEMORY_LIMIT",
             "hardware.max_shared_memory_per_block_bytes is missing.",
@@ -610,7 +640,7 @@ def evaluate_predicate(ir: dict[str, Any], predicate: dict[str, Any], check_id: 
 
 
 def evaluate_ir_predicate(ir: dict[str, Any], predicate: dict[str, Any]) -> dict[str, Any]:
-    op = predicate.get("op")
+    op = normalize_predicate_op(predicate.get("op"))
     left = resolve_predicate_operand(ir, predicate.get("lhs", {}))
 
     if op == "is_not_null":
@@ -658,6 +688,16 @@ def evaluate_ir_predicate(ir: dict[str, Any], predicate: dict[str, Any]) -> dict
         "right": right,
         "op": op,
     }
+
+
+def normalize_predicate_op(op: Any) -> Any:
+    """Normalize accepted schema aliases before evaluating a predicate."""
+    aliases = {
+        "not_null": "is_not_null",
+        "nonnull": "is_not_null",
+        "null": "is_null",
+    }
+    return aliases.get(op, op)
 
 
 def evaluate_logical_predicate(ir: dict[str, Any], predicate: dict[str, Any], check_id: str) -> dict[str, Any]:

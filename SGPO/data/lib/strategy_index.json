@@ -1,13 +1,13 @@
 {
   "index_name": "SGPO Stage-Oriented Strategy Index",
-  "index_version": "7.0-stage-oriented",
+  "index_version": "8.1-joint-tiling",
   "source_indices": [
     "/mnt/data/strategy_index_qimeng_v1_1.json",
     "/mnt/data/strategy_index_warp_comprehensive_v5.json",
     "/mnt/data/strategy_index_comprehensive_addendum_v6.json",
     "/mnt/data/6c36e7cc-2fd4-4914-bc46-1fc5e6e09fd5.json"
   ],
-  "strategy_count_total_loaded": 130,
+  "strategy_count_total_loaded": 136,
   "purpose": "Stage-oriented lightweight index for LLM strategy selection. Unlike the old flat index, this index restricts strategy selection by stage and subphase order. Micro-strategies only provide local OptIR fields. Stage-level verification runs after the stage is complete.",
   "global_selection_rules": [
     "The LLM must first follow current_stage and current_subphase.",
@@ -55,18 +55,26 @@
             "Tiling.BlockTile.32x32x8",
             "Tiling.BlockTile.32x64x16",
             "Tiling.BlockTile.64x128x16",
-            "Tiling.BlockTile.64x64x16"
+            "Tiling.BlockTile.64x64x16",
+            "Tiling.BlockTile.32x128x16",
+            "Tiling.BlockTile.64x32x16",
+            "Tiling.BlockTile.128x32x16",
+            "Tiling.BlockTile.64x64x32",
+            "Tiling.BlockTile.64x128x32",
+            "Tiling.BlockTile.128x64x32",
+            "Tiling.BlockTile.128x128x32"
           ],
-          "candidate_count": 7,
+          "candidate_count": 14,
           "requires_fields": [
             "problem.M",
             "problem.N",
             "problem.K"
           ],
           "provides_fields": [
+            "tiling.block_k",
             "tiling.block_m",
             "tiling.block_n",
-            "tiling.block_k"
+            "tiling.enabled"
           ],
           "derived_fields": {},
           "local_checks": [
@@ -103,20 +111,23 @@
             "Tiling.WarpTile.64x32",
             "Tiling.WarpTile.64x64",
             "Tiling.WarpTile.ParametricWMxWN",
-            "Tiling.WarpTile.WMxWN"
+            "Tiling.WarpTile.WMxWN",
+            "Tiling.WarpTile.16x16",
+            "Tiling.WarpTile.16x64",
+            "Tiling.WarpTile.64x16"
           ],
-          "candidate_count": 7,
+          "candidate_count": 10,
           "requires_fields": [
             "tiling.block_m",
             "tiling.block_n",
             "hardware.warp_size"
           ],
           "provides_fields": [
-            "tiling.warp_tile.warp_m",
-            "tiling.warp_tile.warp_n",
             "mapping.warps_m",
             "mapping.warps_n",
-            "mapping.warps_per_block"
+            "mapping.warps_per_block",
+            "tiling.warp_tile.warp_m",
+            "tiling.warp_tile.warp_n"
           ],
           "derived_fields": {
             "mapping.warps_m": "tiling.block_m / tiling.warp_tile.warp_m",
@@ -150,21 +161,27 @@
           "allowed_strategy_ids": [
             "Tiling.ThreadTile.2x2",
             "Tiling.ThreadTile.4x4",
-            "Tiling.WarpTile.Iteration.WMITERxWNITER"
+            "Tiling.ThreadTile.4x8",
+            "Tiling.ThreadTile.8x4",
+            "Tiling.ThreadTile.2x4",
+            "Tiling.ThreadTile.4x2",
+            "Tiling.ThreadTile.2x8",
+            "Tiling.ThreadTile.8x2"
           ],
-          "candidate_count": 3,
+          "candidate_count": 8,
           "requires_fields": [
             "tiling.warp_tile.warp_m",
             "tiling.warp_tile.warp_n",
             "hardware.warp_size"
           ],
           "provides_fields": [
+            "mapping.outputs_per_thread",
+            "mapping.outputs_per_warp",
+            "memory.use_register_tile",
             "tiling.thread_m",
             "tiling.thread_n",
             "tiling.warp_tile.warp_m_iter",
-            "tiling.warp_tile.warp_n_iter",
-            "mapping.outputs_per_thread",
-            "mapping.outputs_per_warp"
+            "tiling.warp_tile.warp_n_iter"
           ],
           "derived_fields": {
             "mapping.outputs_per_thread": "thread_m * thread_n * warp_m_iter * warp_n_iter",
@@ -259,7 +276,7 @@
         "predicates": [
           "tiling.block_m % tiling.warp_tile.warp_m == 0",
           "tiling.block_n % tiling.warp_tile.warp_n == 0",
-          "tiling.warp_tile.warp_m * tiling.warp_tile.warp_n == hardware.warp_size * tiling.thread_m * tiling.thread_n * tiling.warp_tile.warp_m_iter * tiling.warp_tile.warp_n_iter",
+          "hardware.warp_size == (tiling.warp_tile.warp_m_iter / tiling.thread_m) * (tiling.warp_tile.warp_n_iter / tiling.thread_n)",
           "mapping.threads_per_block == mapping.warps_per_block * hardware.warp_size",
           "mapping.threads_per_block <= hardware.max_threads_per_block"
         ],
@@ -329,7 +346,12 @@
             "Layout.SharedMemory.Transpose*",
             "Layout.SharedMemory.Skew*",
             "Layout.SharedMemory.WarpAwareSwizzle*",
-            "Layout.SharedMemory.BankConflictAnalysis"
+            "Layout.SharedMemory.BankConflictAnalysis",
+            "Memory.SharedMemory.DynamicOptIn",
+            "Layout.SharedMemory.WarpAwareSwizzleA",
+            "Layout.SharedMemory.SkewA.Xor",
+            "Layout.SharedMemory.WarpAwareSwizzleB",
+            "Layout.SharedMemory.SkewB.Xor"
           ],
           "allowed_strategy_ids": [
             "Layout.SharedMemory.BankConflictAnalysis",
@@ -341,9 +363,10 @@
             "Layout.SharedMemory.TransposeA",
             "Layout.SharedMemory.TransposeB",
             "Layout.SharedMemory.WarpAwareSwizzleA",
-            "Layout.SharedMemory.WarpAwareSwizzleB"
+            "Layout.SharedMemory.WarpAwareSwizzleB",
+            "Memory.SharedMemory.DynamicOptIn"
           ],
-          "candidate_count": 10,
+          "candidate_count": 11,
           "requires_fields": [
             "memory.shared_A.shape",
             "memory.shared_B.shape"
@@ -458,11 +481,17 @@
           ],
           "candidate_count": 1,
           "requires_fields": [
-            "memory.use_shared_memory"
+            "memory.use_shared_memory",
+            "memory.shared_A.shape",
+            "memory.shared_B.shape",
+            "memory.use_register_tile",
+            "mapping.threads_per_block",
+            "tiling.block_k"
           ],
           "provides_fields": [
             "schedule.loop_structure",
-            "synchronization.sync_policy.after_global_to_shared_load"
+            "synchronization.sync_policy.after_global_to_shared_load",
+            "synchronization.sync_policy.before_shared_buffer_reuse"
           ],
           "derived_fields": {},
           "local_checks": [],
@@ -525,7 +554,8 @@
             "Reordering.KLoop.*",
             "Reordering.WarpCompute.*",
             "Register.Cache*.Fragment",
-            "Register.FFMA.Schedule*"
+            "Register.FFMA.Schedule*",
+            "Reordering.ComputeBundle.*"
           ],
           "allowed_strategy_ids": [
             "Register.CacheA.Fragment",
@@ -539,19 +569,20 @@
             "Reordering.KLoop.Unroll8",
             "Reordering.KLoop.UnrollBK",
             "Reordering.KLoop.UnrollMicroK",
-            "Reordering.WarpCompute.KOuterInnerSchedule"
+            "Reordering.WarpCompute.KOuterInnerSchedule",
+            "Reordering.ComputeBundle.RegisterTiledOuterProduct"
           ],
-          "candidate_count": 12,
+          "candidate_count": 13,
           "requires_fields": [
             "memory.use_register_tile",
             "mapping.thread_to_output"
           ],
           "provides_fields": [
-            "schedule.unrolling",
-            "schedule.ffma",
-            "schedule.warp_compute",
             "register.cache_A",
-            "register.cache_B"
+            "register.cache_B",
+            "schedule.ffma",
+            "schedule.unrolling",
+            "schedule.warp_compute"
           ],
           "derived_fields": {},
           "local_checks": [],
@@ -775,22 +806,32 @@
           "allowed_strategy_patterns": [
             "Pipeline.DoubleBuffer.*",
             "Pipeline.WarpAwareDoubleBuffer.*",
-            "Pipeline.NoAsyncCopy.V1"
+            "Pipeline.NoAsyncCopy.V1",
+            "Pipeline.CpAsync.Multistage3.*",
+            "Pipeline.CpAsync.Multistage4.*",
+            "Pipeline.CpAsync.Multistage2.SharedAB",
+            "Pipeline.CpAsync.Multistage3.SharedAB",
+            "Pipeline.CpAsync.Multistage4.SharedAB"
           ],
           "allowed_strategy_ids": [
             "Pipeline.DoubleBuffer.SharedAB",
             "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
             "Pipeline.NoAsyncCopy.V1",
-            "Pipeline.WarpAwareDoubleBuffer.SharedAB"
+            "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+            "Pipeline.CpAsync.Multistage3.SharedAB",
+            "Pipeline.CpAsync.Multistage4.SharedAB",
+            "Pipeline.CpAsync.Multistage2.SharedAB"
           ],
-          "candidate_count": 4,
+          "candidate_count": 7,
           "requires_fields": [
             "resource.shared_memory.total_bytes"
           ],
           "provides_fields": [
+            "pipeline.async_copy",
+            "pipeline.copy_mechanism",
+            "pipeline.double_buffering",
             "pipeline.enabled",
             "pipeline.stage_count",
-            "pipeline.double_buffering",
             "resource.shared_memory.pipeline_multiplier"
           ],
           "derived_fields": {},
@@ -847,7 +888,11 @@
             "Mapping.CTASwizzle.*",
             "Memory.L2Reuse.*",
             "Scheduling.PersistentCTA.*",
-            "Reduction.StreamK.*"
+            "Reduction.StreamK.*",
+            "Reduction.SplitK.*",
+            "Reduction.SplitK.Workspace",
+            "Reduction.StreamK.WorkDecomposition",
+            "Memory.L2Persistence.AccessWindow"
           ],
           "allowed_strategy_ids": [
             "Mapping.CTASwizzle.GroupedN",
@@ -855,9 +900,12 @@
             "Memory.L2Reuse.CTASwizzleGroupedN",
             "Memory.L2Reuse.CTASwizzleGroupedM",
             "Scheduling.PersistentCTA.StaticTileLoop",
-            "Reduction.StreamK.WorkDecomposition"
+            "Reduction.StreamK.WorkDecomposition",
+            "Scheduling.PersistentCTA.GridStrideTiles",
+            "Reduction.SplitK.Workspace",
+            "Memory.L2Persistence.AccessWindow"
           ],
-          "candidate_count": 6,
+          "candidate_count": 9,
           "requires_fields": [
             "problem.size_class",
             "tiling.block_m",
@@ -865,10 +913,14 @@
             "mapping.threads_per_block"
           ],
           "provides_fields": [
-            "scheduling.cta_swizzle",
             "memory.l2_reuse_policy",
+            "reduction.finalization",
+            "reduction.workspace_required",
+            "scheduling.cta_swizzle",
+            "scheduling.persistent_cta",
+            "scheduling.tile_assignment",
             "scheduling.wave_quantization",
-            "scheduling.persistent_cta"
+            "scheduling.work_decomposition"
           ],
           "derived_fields": {},
           "local_checks": [],
@@ -1052,7 +1104,12 @@
             "Compiler.ForceInline.*",
             "Compiler.RestrictPointer",
             "Compiler.FastMath.Enabled",
-            "Compiler.TemplateSpecialization.*"
+            "Compiler.TemplateSpecialization.*",
+            "Memory.SharedMemory.Carveout.0",
+            "Memory.SharedMemory.Carveout.50",
+            "Memory.SharedMemory.Carveout.100",
+            "Compiler.LaunchBounds.MaxThreads",
+            "Compiler.LaunchBounds.MinBlocksPerSM"
           ],
           "allowed_strategy_ids": [
             "Compiler.FastMath.Enabled",
@@ -1060,9 +1117,12 @@
             "Compiler.LaunchBounds.MaxThreads",
             "Compiler.LaunchBounds.MinBlocksPerSM",
             "Compiler.RestrictPointer",
-            "Compiler.TemplateSpecialization.ShapeStatic"
+            "Compiler.TemplateSpecialization.ShapeStatic",
+            "Memory.SharedMemory.Carveout.0",
+            "Memory.SharedMemory.Carveout.50",
+            "Memory.SharedMemory.Carveout.100"
           ],
-          "candidate_count": 6,
+          "candidate_count": 9,
           "requires_fields": [],
           "provides_fields": [
             "compiler.attributes"
@@ -1085,18 +1145,24 @@
           "allowed_strategy_patterns": [
             "Compiler.Ptxas.MaxRegisterCount",
             "Tuning.WarpOccupancyBalance",
-            "Scheduling.WaveQuantization.SMResidentBlocks"
+            "Scheduling.WaveQuantization.SMResidentBlocks",
+            "Compiler.ResourceFeedback.*",
+            "Compiler.ResourceFeedback.PtxasOccupancySweep"
           ],
           "allowed_strategy_ids": [
             "Compiler.Ptxas.MaxRegisterCount",
             "Scheduling.WaveQuantization.SMResidentBlocks",
-            "Tuning.WarpOccupancyBalance"
+            "Tuning.WarpOccupancyBalance",
+            "Compiler.ResourceFeedback.PtxasOccupancySweep"
           ],
-          "candidate_count": 3,
+          "candidate_count": 4,
           "requires_fields": [],
           "provides_fields": [
-            "resource.register.final",
-            "resource.occupancy.final"
+            "compiler.resource_feedback.enabled",
+            "compiler.resource_feedback.metric",
+            "compiler.resource_feedback.source",
+            "resource.occupancy.final",
+            "resource.register.final"
           ],
           "derived_fields": {},
           "local_checks": [],
@@ -1136,10 +1202,14 @@
         "Compiler.LaunchBounds.MaxThreads",
         "Compiler.LaunchBounds.MinBlocksPerSM",
         "Compiler.Ptxas.MaxRegisterCount",
+        "Compiler.ResourceFeedback.PtxasOccupancySweep",
         "Compiler.RestrictPointer",
         "Compiler.TemplateSpecialization.ShapeStatic",
         "Scheduling.WaveQuantization.SMResidentBlocks",
-        "Tuning.WarpOccupancyBalance"
+        "Tuning.WarpOccupancyBalance",
+        "Memory.SharedMemory.Carveout.0",
+        "Memory.SharedMemory.Carveout.50",
+        "Memory.SharedMemory.Carveout.100"
       ],
       "Epilogue": [
         "Epilogue.AlphaBeta.General",
@@ -1173,7 +1243,8 @@
         "Layout.SharedMemory.WarpAwareSwizzleB",
         "Register.AccumulatorLayout.2DArray",
         "Register.AccumulatorLayout.FlatArray",
-        "Register.AccumulatorLayout.ScalarUnrolled"
+        "Register.AccumulatorLayout.ScalarUnrolled",
+        "Memory.SharedMemory.DynamicOptIn"
       ],
       "MappingReordering": [
         "Layout.SharedMemory.VectorizedStoreA.float4",
@@ -1182,6 +1253,7 @@
         "Register.CacheB.Fragment",
         "Register.FFMA.ScheduleInterleaved",
         "Register.FFMA.ScheduleOuterProduct",
+        "Reordering.ComputeBundle.RegisterTiledOuterProduct",
         "Reordering.KLoop.ManualUnroll",
         "Reordering.KLoop.NoUnrollForRegisterPressure",
         "Reordering.KLoop.PragmaUnroll",
@@ -1202,13 +1274,19 @@
         "Memory.L2Reuse.CTASwizzleGroupedN",
         "Memory.Prefetch.GlobalToRegisterA",
         "Memory.Prefetch.GlobalToRegisterB",
+        "Pipeline.CpAsync.Multistage3.SharedAB",
+        "Pipeline.CpAsync.Multistage4.SharedAB",
         "Pipeline.DoubleBuffer.SharedAB",
         "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
         "Pipeline.NoAsyncCopy.V1",
         "Pipeline.WarpAwareDoubleBuffer.SharedAB",
         "Pipeline.WarpRegisterPrefetchAB",
+        "Reduction.SplitK.Workspace",
         "Reduction.StreamK.WorkDecomposition",
-        "Scheduling.PersistentCTA.StaticTileLoop"
+        "Scheduling.PersistentCTA.GridStrideTiles",
+        "Scheduling.PersistentCTA.StaticTileLoop",
+        "Pipeline.CpAsync.Multistage2.SharedAB",
+        "Memory.L2Persistence.AccessWindow"
       ],
       "Tiling": [
         "Mapping.LaneLayout.1DContiguousM",
@@ -1219,20 +1297,35 @@
         "Mapping.WarpThreadTile.WarpLaneFragment2D",
         "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
         "Tiling.BlockTile.128x128x16",
+        "Tiling.BlockTile.128x128x32",
         "Tiling.BlockTile.128x128x8",
+        "Tiling.BlockTile.128x32x16",
         "Tiling.BlockTile.128x64x16",
+        "Tiling.BlockTile.128x64x32",
+        "Tiling.BlockTile.32x128x16",
         "Tiling.BlockTile.32x32x8",
         "Tiling.BlockTile.32x64x16",
         "Tiling.BlockTile.64x128x16",
+        "Tiling.BlockTile.64x128x32",
+        "Tiling.BlockTile.64x32x16",
         "Tiling.BlockTile.64x64x16",
+        "Tiling.BlockTile.64x64x32",
         "Tiling.ThreadTile.2x2",
+        "Tiling.ThreadTile.2x4",
+        "Tiling.ThreadTile.2x8",
+        "Tiling.ThreadTile.4x2",
         "Tiling.ThreadTile.4x4",
+        "Tiling.ThreadTile.4x8",
+        "Tiling.ThreadTile.8x2",
+        "Tiling.ThreadTile.8x4",
+        "Tiling.WarpTile.16x16",
         "Tiling.WarpTile.16x32",
+        "Tiling.WarpTile.16x64",
         "Tiling.WarpTile.32x32",
         "Tiling.WarpTile.32x64",
+        "Tiling.WarpTile.64x16",
         "Tiling.WarpTile.64x32",
         "Tiling.WarpTile.64x64",
-        "Tiling.WarpTile.Iteration.WMITERxWNITER",
         "Tiling.WarpTile.ParametricWMxWN",
         "Tiling.WarpTile.WMxWN"
       ],
@@ -1261,10 +1354,14 @@
         "Compiler.LaunchBounds.MaxThreads",
         "Compiler.LaunchBounds.MinBlocksPerSM",
         "Compiler.Ptxas.MaxRegisterCount",
+        "Compiler.ResourceFeedback.PtxasOccupancySweep",
         "Compiler.RestrictPointer",
         "Compiler.TemplateSpecialization.ShapeStatic",
         "Scheduling.WaveQuantization.SMResidentBlocks",
-        "Tuning.WarpOccupancyBalance"
+        "Tuning.WarpOccupancyBalance",
+        "Memory.SharedMemory.Carveout.0",
+        "Memory.SharedMemory.Carveout.50",
+        "Memory.SharedMemory.Carveout.100"
       ],
       "Epilogue": [
         "Epilogue.AlphaBeta.General",
@@ -1298,7 +1395,8 @@
         "Layout.SharedMemory.WarpAwareSwizzleB",
         "Register.AccumulatorLayout.2DArray",
         "Register.AccumulatorLayout.FlatArray",
-        "Register.AccumulatorLayout.ScalarUnrolled"
+        "Register.AccumulatorLayout.ScalarUnrolled",
+        "Memory.SharedMemory.DynamicOptIn"
       ],
       "MappingReordering": [
         "Layout.SharedMemory.VectorizedStoreA.float4",
@@ -1307,6 +1405,7 @@
         "Register.CacheB.Fragment",
         "Register.FFMA.ScheduleInterleaved",
         "Register.FFMA.ScheduleOuterProduct",
+        "Reordering.ComputeBundle.RegisterTiledOuterProduct",
         "Reordering.KLoop.ManualUnroll",
         "Reordering.KLoop.NoUnrollForRegisterPressure",
         "Reordering.KLoop.PragmaUnroll",
@@ -1327,13 +1426,19 @@
         "Memory.L2Reuse.CTASwizzleGroupedN",
         "Memory.Prefetch.GlobalToRegisterA",
         "Memory.Prefetch.GlobalToRegisterB",
+        "Pipeline.CpAsync.Multistage3.SharedAB",
+        "Pipeline.CpAsync.Multistage4.SharedAB",
         "Pipeline.DoubleBuffer.SharedAB",
         "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
         "Pipeline.NoAsyncCopy.V1",
         "Pipeline.WarpAwareDoubleBuffer.SharedAB",
         "Pipeline.WarpRegisterPrefetchAB",
+        "Reduction.SplitK.Workspace",
         "Reduction.StreamK.WorkDecomposition",
-        "Scheduling.PersistentCTA.StaticTileLoop"
+        "Scheduling.PersistentCTA.GridStrideTiles",
+        "Scheduling.PersistentCTA.StaticTileLoop",
+        "Pipeline.CpAsync.Multistage2.SharedAB",
+        "Memory.L2Persistence.AccessWindow"
       ],
       "Tiling": [
         "Mapping.LaneLayout.1DContiguousM",
@@ -1344,20 +1449,35 @@
         "Mapping.WarpThreadTile.WarpLaneFragment2D",
         "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
         "Tiling.BlockTile.128x128x16",
+        "Tiling.BlockTile.128x128x32",
         "Tiling.BlockTile.128x128x8",
+        "Tiling.BlockTile.128x32x16",
         "Tiling.BlockTile.128x64x16",
+        "Tiling.BlockTile.128x64x32",
+        "Tiling.BlockTile.32x128x16",
         "Tiling.BlockTile.32x32x8",
         "Tiling.BlockTile.32x64x16",
         "Tiling.BlockTile.64x128x16",
+        "Tiling.BlockTile.64x128x32",
+        "Tiling.BlockTile.64x32x16",
         "Tiling.BlockTile.64x64x16",
+        "Tiling.BlockTile.64x64x32",
         "Tiling.ThreadTile.2x2",
+        "Tiling.ThreadTile.2x4",
+        "Tiling.ThreadTile.2x8",
+        "Tiling.ThreadTile.4x2",
         "Tiling.ThreadTile.4x4",
+        "Tiling.ThreadTile.4x8",
+        "Tiling.ThreadTile.8x2",
+        "Tiling.ThreadTile.8x4",
+        "Tiling.WarpTile.16x16",
         "Tiling.WarpTile.16x32",
+        "Tiling.WarpTile.16x64",
         "Tiling.WarpTile.32x32",
         "Tiling.WarpTile.32x64",
+        "Tiling.WarpTile.64x16",
         "Tiling.WarpTile.64x32",
         "Tiling.WarpTile.64x64",
-        "Tiling.WarpTile.Iteration.WMITERxWNITER",
         "Tiling.WarpTile.ParametricWMxWN",
         "Tiling.WarpTile.WMxWN"
       ],
@@ -1382,7 +1502,7 @@
   },
   "subphase_candidate_summary": {
     "Tiling.BlockTileSelection": {
-      "candidate_count": 7,
+      "candidate_count": 14,
       "allowed_strategy_ids": [
         "Tiling.BlockTile.128x128x16",
         "Tiling.BlockTile.128x128x8",
@@ -1390,11 +1510,18 @@
         "Tiling.BlockTile.32x32x8",
         "Tiling.BlockTile.32x64x16",
         "Tiling.BlockTile.64x128x16",
-        "Tiling.BlockTile.64x64x16"
+        "Tiling.BlockTile.64x64x16",
+        "Tiling.BlockTile.32x128x16",
+        "Tiling.BlockTile.64x32x16",
+        "Tiling.BlockTile.128x32x16",
+        "Tiling.BlockTile.64x64x32",
+        "Tiling.BlockTile.64x128x32",
+        "Tiling.BlockTile.128x64x32",
+        "Tiling.BlockTile.128x128x32"
       ]
     },
     "Tiling.WarpTileSelection": {
-      "candidate_count": 7,
+      "candidate_count": 10,
       "allowed_strategy_ids": [
         "Tiling.WarpTile.16x32",
         "Tiling.WarpTile.32x32",
@@ -1402,15 +1529,23 @@
         "Tiling.WarpTile.64x32",
         "Tiling.WarpTile.64x64",
         "Tiling.WarpTile.ParametricWMxWN",
-        "Tiling.WarpTile.WMxWN"
+        "Tiling.WarpTile.WMxWN",
+        "Tiling.WarpTile.16x16",
+        "Tiling.WarpTile.16x64",
+        "Tiling.WarpTile.64x16"
       ]
     },
     "Tiling.ThreadTileSelection": {
-      "candidate_count": 3,
+      "candidate_count": 8,
       "allowed_strategy_ids": [
         "Tiling.ThreadTile.2x2",
         "Tiling.ThreadTile.4x4",
-        "Tiling.WarpTile.Iteration.WMITERxWNITER"
+        "Tiling.ThreadTile.4x8",
+        "Tiling.ThreadTile.8x4",
+        "Tiling.ThreadTile.2x4",
+        "Tiling.ThreadTile.4x2",
+        "Tiling.ThreadTile.2x8",
+        "Tiling.ThreadTile.8x2"
       ]
     },
     "Tiling.MappingDerivation": {
@@ -1432,7 +1567,7 @@
       ]
     },
     "Layout.SharedMemoryTransform": {
-      "candidate_count": 10,
+      "candidate_count": 11,
       "allowed_strategy_ids": [
         "Layout.SharedMemory.BankConflictAnalysis",
         "Layout.SharedMemory.PaddingA.Plus1",
@@ -1443,7 +1578,8 @@
         "Layout.SharedMemory.TransposeA",
         "Layout.SharedMemory.TransposeB",
         "Layout.SharedMemory.WarpAwareSwizzleA",
-        "Layout.SharedMemory.WarpAwareSwizzleB"
+        "Layout.SharedMemory.WarpAwareSwizzleB",
+        "Memory.SharedMemory.DynamicOptIn"
       ]
     },
     "Layout.RegisterAccumulatorLayout": {
@@ -1472,7 +1608,7 @@
       ]
     },
     "Reordering.ComputeSchedule": {
-      "candidate_count": 12,
+      "candidate_count": 13,
       "allowed_strategy_ids": [
         "Register.CacheA.Fragment",
         "Register.CacheB.Fragment",
@@ -1485,7 +1621,8 @@
         "Reordering.KLoop.Unroll8",
         "Reordering.KLoop.UnrollBK",
         "Reordering.KLoop.UnrollMicroK",
-        "Reordering.WarpCompute.KOuterInnerSchedule"
+        "Reordering.WarpCompute.KOuterInnerSchedule",
+        "Reordering.ComputeBundle.RegisterTiledOuterProduct"
       ]
     },
     "Vectorization.AlignmentPolicy": {
@@ -1522,12 +1659,15 @@
       "allowed_strategy_ids": []
     },
     "Pipeline.BufferingSelection": {
-      "candidate_count": 4,
+      "candidate_count": 7,
       "allowed_strategy_ids": [
         "Pipeline.DoubleBuffer.SharedAB",
         "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
         "Pipeline.NoAsyncCopy.V1",
-        "Pipeline.WarpAwareDoubleBuffer.SharedAB"
+        "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+        "Pipeline.CpAsync.Multistage3.SharedAB",
+        "Pipeline.CpAsync.Multistage4.SharedAB",
+        "Pipeline.CpAsync.Multistage2.SharedAB"
       ]
     },
     "Pipeline.PrefetchSelection": {
@@ -1539,14 +1679,17 @@
       ]
     },
     "Pipeline.LargeMatrixScheduling": {
-      "candidate_count": 6,
+      "candidate_count": 9,
       "allowed_strategy_ids": [
         "Mapping.CTASwizzle.GroupedN",
         "Mapping.CTASwizzle.GroupedM",
         "Memory.L2Reuse.CTASwizzleGroupedN",
         "Memory.L2Reuse.CTASwizzleGroupedM",
         "Scheduling.PersistentCTA.StaticTileLoop",
-        "Reduction.StreamK.WorkDecomposition"
+        "Reduction.StreamK.WorkDecomposition",
+        "Scheduling.PersistentCTA.GridStrideTiles",
+        "Reduction.SplitK.Workspace",
+        "Memory.L2Persistence.AccessWindow"
       ]
     },
     "Epilogue.AlphaBetaPolicy": {
@@ -1580,22 +1723,26 @@
       ]
     },
     "Compiler.AttributeSelection": {
-      "candidate_count": 6,
+      "candidate_count": 9,
       "allowed_strategy_ids": [
         "Compiler.FastMath.Enabled",
         "Compiler.ForceInline.DeviceFunctions",
         "Compiler.LaunchBounds.MaxThreads",
         "Compiler.LaunchBounds.MinBlocksPerSM",
         "Compiler.RestrictPointer",
-        "Compiler.TemplateSpecialization.ShapeStatic"
+        "Compiler.TemplateSpecialization.ShapeStatic",
+        "Memory.SharedMemory.Carveout.0",
+        "Memory.SharedMemory.Carveout.50",
+        "Memory.SharedMemory.Carveout.100"
       ]
     },
     "Compiler.ResourceTuning": {
-      "candidate_count": 3,
+      "candidate_count": 4,
       "allowed_strategy_ids": [
         "Compiler.Ptxas.MaxRegisterCount",
         "Scheduling.WaveQuantization.SMResidentBlocks",
-        "Tuning.WarpOccupancyBalance"
+        "Tuning.WarpOccupancyBalance",
+        "Compiler.ResourceFeedback.PtxasOccupancySweep"
       ]
     }
   },
@@ -1619,14 +1766,56 @@
       "stage": "Compiler",
       "category": "Compiler",
       "subphase": "Compiler.AttributeSelection",
-      "maturity": "v1"
+      "name": "Compiler.LaunchBounds.MaxThreads",
+      "short_description": "Tune launch bounds using actual launch thread count, registers, shared bytes and SM residency; require a kernel-declaration edit boundary and measured spills/latency, not merely compiler.attributes != null.",
+      "intent": "Tune launch bounds using actual launch thread count, registers, shared bytes and SM residency; require a kernel-declaration edit boundary and measured spills/latency, not merely compiler.attributes != null.",
+      "risk_summary": "medium",
+      "priority": 50,
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "canonical_strategy_id": "Compiler.LaunchBounds.MaxThreads",
+      "alias_of": null,
+      "conflict_group": "compiler.launch_bounds",
+      "modifies_regions": [
+        "kernel_declaration"
+      ],
+      "provides_fields": [],
+      "requires_fields": [
+        "mapping.threads_per_block"
+      ],
+      "activation_status": "executor_required",
+      "materialization": {
+        "mode": "orchestrator_required",
+        "llm_required": false
+      }
     },
     {
       "strategy_id": "Compiler.LaunchBounds.MinBlocksPerSM",
       "stage": "Compiler",
       "category": "Compiler",
       "subphase": "Compiler.AttributeSelection",
-      "maturity": "v1"
+      "name": "Compiler.LaunchBounds.MinBlocksPerSM",
+      "short_description": "Tune launch bounds using actual launch thread count, registers, shared bytes and SM residency; require a kernel-declaration edit boundary and measured spills/latency, not merely compiler.attributes != null.",
+      "intent": "Tune launch bounds using actual launch thread count, registers, shared bytes and SM residency; require a kernel-declaration edit boundary and measured spills/latency, not merely compiler.attributes != null.",
+      "risk_summary": "medium",
+      "priority": 50,
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "canonical_strategy_id": "Compiler.LaunchBounds.MinBlocksPerSM",
+      "alias_of": null,
+      "conflict_group": "compiler.launch_bounds",
+      "modifies_regions": [
+        "kernel_declaration"
+      ],
+      "provides_fields": [],
+      "requires_fields": [
+        "mapping.threads_per_block"
+      ],
+      "activation_status": "executor_required",
+      "materialization": {
+        "mode": "orchestrator_required",
+        "llm_required": false
+      }
     },
     {
       "strategy_id": "Compiler.Ptxas.MaxRegisterCount",
@@ -1634,6 +1823,37 @@
       "category": "Compiler",
       "subphase": "Compiler.ResourceTuning",
       "maturity": "v1"
+    },
+    {
+      "strategy_id": "Compiler.ResourceFeedback.PtxasOccupancySweep",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.ResourceTuning",
+      "name": "Bounded PTXAS register-budget sweep",
+      "short_description": "Compile the current/default register budget and budgets 64, 96, 128. Record PTXAS registers and spills; retain the fastest correct mean latency. Launch-bounds sweeping is not implemented.",
+      "intent": "Compile the current/default register budget and budgets 64, 96, 128. Record PTXAS registers and spills; retain the fastest correct mean latency. Launch-bounds sweeping is not implemented.",
+      "risk_summary": "low",
+      "priority": 92,
+      "maturity": "v1",
+      "phase": "phase2_unlock_general",
+      "canonical_strategy_id": "Compiler.ResourceFeedback.PtxasOccupancySweep",
+      "alias_of": null,
+      "conflict_group": "compiler.resource_tuning",
+      "modifies_regions": [
+        "build_config",
+        "launch_config"
+      ],
+      "provides_fields": [
+        "compiler.resource_feedback.enabled",
+        "compiler.resource_feedback.metric",
+        "compiler.resource_feedback.source"
+      ],
+      "requires_fields": [],
+      "activation_status": "enabled",
+      "materialization": {
+        "mode": "compiler_resource_sweep",
+        "llm_required": false
+      }
     },
     {
       "strategy_id": "Compiler.RestrictPointer",
@@ -1717,7 +1937,9 @@
       "stage": "Layout",
       "category": "Layout",
       "subphase": "Layout.RegisterAccumulatorLayout",
-      "maturity": "v1"
+      "maturity": "v1",
+      "alias_of": "Register.AccumulatorLayout.2DArray",
+      "canonical_strategy_id": "Register.AccumulatorLayout.2DArray"
     },
     {
       "strategy_id": "Layout.SharedMemory.AB.Basic",
@@ -1731,7 +1953,24 @@
       "stage": "Layout",
       "category": "Layout",
       "subphase": "Layout.SharedMemoryTransform",
-      "maturity": "v1"
+      "name": "Shared-memory bank-conflict profiling",
+      "short_description": "Analyze per-instruction warp shared addresses, access width and broadcasts, and correlate with hardware bank-conflict counters. This is an analysis pass, not a layout mutation.",
+      "intent": "Analyze per-instruction warp shared addresses, access width and broadcasts, and correlate with hardware bank-conflict counters. This is an analysis pass, not a layout mutation.",
+      "risk_summary": "low",
+      "priority": 50,
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "canonical_strategy_id": "Layout.SharedMemory.BankConflictAnalysis",
+      "alias_of": null,
+      "conflict_group": "analysis.bank_conflicts",
+      "modifies_regions": [],
+      "provides_fields": [],
+      "requires_fields": [
+        "memory.shared_A.shape",
+        "memory.shared_B.shape"
+      ],
+      "activation_status": "profiler_required",
+      "materialization": {}
     },
     {
       "strategy_id": "Layout.SharedMemory.PaddingA.Plus1",
@@ -1759,14 +1998,64 @@
       "stage": "Layout",
       "category": "Layout",
       "subphase": "Layout.SharedMemoryTransform",
-      "maturity": "v1"
+      "name": "Warp-aware XOR swizzle for A",
+      "short_description": "Apply a bijective XOR address transform to the shared-memory minor coordinate, using exactly the same transform in producers and consumers. Select mask from lane access pattern and vector alignment, not tensor naming.",
+      "intent": "Apply a bijective XOR address transform to the shared-memory minor coordinate, using exactly the same transform in producers and consumers. Select mask from lane access pattern and vector alignment, not tensor naming.",
+      "risk_summary": "medium",
+      "priority": 60,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Layout.SharedMemory.SkewA.Xor",
+      "alias_of": null,
+      "conflict_group": "layout.shared_A_transform",
+      "modifies_regions": [
+        "shared_decl",
+        "global_to_shared_load",
+        "compute_inner"
+      ],
+      "provides_fields": [
+        "memory.shared_A.layout"
+      ],
+      "requires_fields": [
+        "memory.shared_A.shape"
+      ],
+      "materialization": {
+        "mode": "llm_structured_patch",
+        "llm_required": true,
+        "scope": "local_anchor_regions_only"
+      }
     },
     {
       "strategy_id": "Layout.SharedMemory.SkewB.Xor",
       "stage": "Layout",
       "category": "Layout",
       "subphase": "Layout.SharedMemoryTransform",
-      "maturity": "v1"
+      "name": "Warp-aware XOR swizzle for B",
+      "short_description": "Apply a bijective XOR address transform to the shared-memory minor coordinate, using exactly the same transform in producers and consumers. Select mask from lane access pattern and vector alignment, not tensor naming.",
+      "intent": "Apply a bijective XOR address transform to the shared-memory minor coordinate, using exactly the same transform in producers and consumers. Select mask from lane access pattern and vector alignment, not tensor naming.",
+      "risk_summary": "medium",
+      "priority": 60,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Layout.SharedMemory.SkewB.Xor",
+      "alias_of": null,
+      "conflict_group": "layout.shared_B_transform",
+      "modifies_regions": [
+        "shared_decl",
+        "global_to_shared_load",
+        "compute_inner"
+      ],
+      "provides_fields": [
+        "memory.shared_B.layout"
+      ],
+      "requires_fields": [
+        "memory.shared_B.shape"
+      ],
+      "materialization": {
+        "mode": "llm_structured_patch",
+        "llm_required": true,
+        "scope": "local_anchor_regions_only"
+      }
     },
     {
       "strategy_id": "Layout.SharedMemory.TransposeA",
@@ -1801,14 +2090,64 @@
       "stage": "Layout",
       "category": "Layout",
       "subphase": "Layout.SharedMemoryTransform",
-      "maturity": "v1"
+      "name": "Warp-aware XOR swizzle for A",
+      "short_description": "Apply a bijective XOR address transform to the shared-memory minor coordinate, using exactly the same transform in producers and consumers. Select mask from lane access pattern and vector alignment, not tensor naming.",
+      "intent": "Apply a bijective XOR address transform to the shared-memory minor coordinate, using exactly the same transform in producers and consumers. Select mask from lane access pattern and vector alignment, not tensor naming.",
+      "risk_summary": "medium",
+      "priority": 60,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Layout.SharedMemory.SkewA.Xor",
+      "alias_of": "Layout.SharedMemory.SkewA.Xor",
+      "conflict_group": "layout.shared_A_transform",
+      "modifies_regions": [
+        "shared_decl",
+        "global_to_shared_load",
+        "compute_inner"
+      ],
+      "provides_fields": [
+        "memory.shared_A.layout"
+      ],
+      "requires_fields": [
+        "memory.shared_A.shape"
+      ],
+      "materialization": {
+        "mode": "llm_structured_patch",
+        "llm_required": true,
+        "scope": "local_anchor_regions_only"
+      }
     },
     {
       "strategy_id": "Layout.SharedMemory.WarpAwareSwizzleB",
       "stage": "Layout",
       "category": "Layout",
       "subphase": "Layout.SharedMemoryTransform",
-      "maturity": "v1"
+      "name": "Warp-aware XOR swizzle for B",
+      "short_description": "Apply a bijective XOR address transform to the shared-memory minor coordinate, using exactly the same transform in producers and consumers. Select mask from lane access pattern and vector alignment, not tensor naming.",
+      "intent": "Apply a bijective XOR address transform to the shared-memory minor coordinate, using exactly the same transform in producers and consumers. Select mask from lane access pattern and vector alignment, not tensor naming.",
+      "risk_summary": "medium",
+      "priority": 60,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Layout.SharedMemory.SkewB.Xor",
+      "alias_of": "Layout.SharedMemory.SkewB.Xor",
+      "conflict_group": "layout.shared_B_transform",
+      "modifies_regions": [
+        "shared_decl",
+        "global_to_shared_load",
+        "compute_inner"
+      ],
+      "provides_fields": [
+        "memory.shared_B.layout"
+      ],
+      "requires_fields": [
+        "memory.shared_B.shape"
+      ],
+      "materialization": {
+        "mode": "llm_structured_patch",
+        "llm_required": true,
+        "scope": "local_anchor_regions_only"
+      }
     },
     {
       "strategy_id": "Mapping.CTASwizzle.GroupedM",
@@ -1829,21 +2168,27 @@
       "stage": "Tiling",
       "category": "Tiling",
       "subphase": "Tiling.MappingDerivation",
-      "maturity": "v1"
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "implementation_status": "unavailable_distinct_lane_mapping"
     },
     {
       "strategy_id": "Mapping.LaneLayout.1DContiguousN",
       "stage": "Tiling",
       "category": "Tiling",
       "subphase": "Tiling.MappingDerivation",
-      "maturity": "v1"
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "implementation_status": "unavailable_distinct_lane_mapping"
     },
     {
       "strategy_id": "Mapping.LaneLayout.2D_8x4",
       "stage": "Tiling",
       "category": "Tiling",
       "subphase": "Tiling.MappingDerivation",
-      "maturity": "v1"
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "implementation_status": "unavailable_fixed_8x4_mapping"
     },
     {
       "strategy_id": "Mapping.Warp.BasicWidLane",
@@ -1909,6 +2254,87 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Pipeline.CpAsync.Multistage3.SharedAB",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.BufferingSelection",
+      "name": "3-stage cp.async shared-memory pipeline",
+      "short_description": "Overlap FP32 SIMT computation with asynchronous global-to-shared copies across 3 stages; balance latency hiding against shared-memory residency.",
+      "intent": "Overlap FP32 SIMT computation with asynchronous global-to-shared copies across 3 stages; balance latency hiding against shared-memory residency.",
+      "risk_summary": "high",
+      "priority": 96,
+      "maturity": "v1",
+      "phase": "phase2_unlock_general",
+      "canonical_strategy_id": "Pipeline.CpAsync.Multistage3.SharedAB",
+      "alias_of": null,
+      "conflict_group": "pipeline.buffering",
+      "modifies_regions": [
+        "shared_decl",
+        "global_to_shared_load",
+        "main_loop",
+        "sync_after_load"
+      ],
+      "provides_fields": [
+        "pipeline.async_copy",
+        "pipeline.copy_mechanism",
+        "pipeline.double_buffering",
+        "pipeline.enabled",
+        "pipeline.stage_count",
+        "resource.shared_memory.pipeline_multiplier"
+      ],
+      "requires_fields": [
+        "hardware.supports_cp_async",
+        "memory.use_shared_memory",
+        "resource.shared_memory.total_bytes"
+      ],
+      "materialization": {
+        "mode": "llm_structured_patch",
+        "llm_required": true,
+        "scope": "local_anchor_regions_only"
+      }
+    },
+    {
+      "strategy_id": "Pipeline.CpAsync.Multistage4.SharedAB",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.BufferingSelection",
+      "name": "4-stage cp.async shared-memory pipeline",
+      "short_description": "Overlap FP32 SIMT computation with asynchronous global-to-shared copies across 4 stages; balance latency hiding against shared-memory residency.",
+      "intent": "Overlap FP32 SIMT computation with asynchronous global-to-shared copies across 4 stages; balance latency hiding against shared-memory residency.",
+      "risk_summary": "high",
+      "priority": 91,
+      "maturity": "v1",
+      "phase": "phase2_unlock_general",
+      "canonical_strategy_id": "Pipeline.CpAsync.Multistage4.SharedAB",
+      "alias_of": null,
+      "conflict_group": "pipeline.buffering",
+      "modifies_regions": [
+        "shared_decl",
+        "global_to_shared_load",
+        "main_loop",
+        "sync_after_load"
+      ],
+      "provides_fields": [
+        "pipeline.async_copy",
+        "pipeline.copy_mechanism",
+        "pipeline.double_buffering",
+        "pipeline.enabled",
+        "pipeline.stage_count",
+        "resource.shared_memory.pipeline_multiplier"
+      ],
+      "requires_fields": [
+        "hardware.supports_cp_async",
+        "memory.use_shared_memory",
+        "resource.shared_memory.total_bytes",
+        "problem.K"
+      ],
+      "materialization": {
+        "mode": "llm_structured_patch",
+        "llm_required": true,
+        "scope": "local_anchor_regions_only"
+      }
+    },
+    {
       "strategy_id": "Pipeline.DoubleBuffer.SharedAB",
       "stage": "Pipeline",
       "category": "Pipeline",
@@ -1927,7 +2353,9 @@
       "stage": "Pipeline",
       "category": "Pipeline",
       "subphase": "Pipeline.BufferingSelection",
-      "maturity": "v1"
+      "maturity": "v1",
+      "optimization_role": "keep_current",
+      "principle": "Keep the existing synchronous construction unchanged; do not remove or reset an existing buffering pipeline."
     },
     {
       "strategy_id": "Pipeline.WarpAwareDoubleBuffer.SharedAB",
@@ -1944,11 +2372,73 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Reduction.SplitK.Workspace",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "name": "Workspace Split-K parallel reduction",
+      "short_description": "Partition long K reductions across CTAs, write FP32 partial tiles to a workspace, and launch a deterministic final reduction kernel.",
+      "intent": "Partition long K reductions across CTAs, write FP32 partial tiles to a workspace, and launch a deterministic final reduction kernel.",
+      "risk_summary": "high",
+      "priority": 84,
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "canonical_strategy_id": "Reduction.SplitK.Workspace",
+      "alias_of": null,
+      "conflict_group": "large_matrix.work_decomposition",
+      "modifies_regions": [
+        "launch_config",
+        "index_mapping",
+        "store"
+      ],
+      "provides_fields": [
+        "reduction.finalization",
+        "reduction.workspace_required",
+        "scheduling.work_decomposition"
+      ],
+      "requires_fields": [
+        "problem.K",
+        "tiling.block_k",
+        "mapping.threads_per_block"
+      ],
+      "activation_status": "executor_required",
+      "materialization": {
+        "mode": "orchestrator_required",
+        "llm_required": false
+      }
+    },
+    {
       "strategy_id": "Reduction.StreamK.WorkDecomposition",
       "stage": "Pipeline",
       "category": "Pipeline",
       "subphase": "Pipeline.LargeMatrixScheduling",
-      "maturity": "v1"
+      "name": "Reduction.StreamK.WorkDecomposition",
+      "short_description": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+      "intent": "Large matrix GEMM scheduling policy that improves CTA ordering, L2 tile reuse, or wave occupancy for large-square workloads.",
+      "risk_summary": "medium",
+      "priority": 75,
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "canonical_strategy_id": "Reduction.StreamK.WorkDecomposition",
+      "alias_of": null,
+      "conflict_group": "large_matrix.work_decomposition",
+      "modifies_regions": [
+        "launch_config",
+        "index_mapping",
+        "store"
+      ],
+      "provides_fields": [
+        "scheduling.work_decomposition"
+      ],
+      "requires_fields": [
+        "problem.K",
+        "tiling.block_k"
+      ],
+      "activation_status": "executor_required",
+      "materialization": {
+        "mode": "orchestrator_required",
+        "llm_required": false
+      }
     },
     {
       "strategy_id": "Register.AccumulatorLayout.2DArray",
@@ -1998,6 +2488,40 @@
       "category": "MappingReordering",
       "subphase": "Reordering.ComputeSchedule",
       "maturity": "v1"
+    },
+    {
+      "strategy_id": "Reordering.ComputeBundle.RegisterTiledOuterProduct",
+      "stage": "MappingReordering",
+      "category": "MappingReordering",
+      "subphase": "Reordering.ComputeSchedule",
+      "name": "Register-tiled outer-product compute bundle",
+      "short_description": "Couple A/B register fragments, K-major loading, an outer-product FFMA schedule, and bounded unrolling so the generated loop exposes independent FP32 FFMA instructions without omitting the K remainder.",
+      "intent": "Couple A/B register fragments, K-major loading, an outer-product FFMA schedule, and bounded unrolling so the generated loop exposes independent FP32 FFMA instructions without omitting the K remainder.",
+      "risk_summary": "medium",
+      "priority": 94,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Reordering.ComputeBundle.RegisterTiledOuterProduct",
+      "alias_of": null,
+      "conflict_group": "schedule.compute_bundle",
+      "modifies_regions": [
+        "register_decl",
+        "compute_inner",
+        "main_loop"
+      ],
+      "provides_fields": [
+        "register.cache_A",
+        "register.cache_B",
+        "schedule.ffma",
+        "schedule.unrolling",
+        "schedule.warp_compute"
+      ],
+      "requires_fields": [
+        "memory.use_shared_memory",
+        "memory.use_register_tile",
+        "tiling.thread_m",
+        "tiling.thread_n"
+      ]
     },
     {
       "strategy_id": "Reordering.CooperativeVectorLoadAB.float4",
@@ -2060,7 +2584,32 @@
       "stage": "MappingReordering",
       "category": "MappingReordering",
       "subphase": "Reordering.LoadComputeStructure",
-      "maturity": "v1"
+      "maturity": "v1",
+      "materialization": {
+        "mode": "llm_patch"
+      },
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Reordering.LoadCompute.SeparatePhases",
+      "alias_of": null,
+      "conflict_group": "load_compute_structure",
+      "modifies_regions": [
+        "global_load",
+        "compute_loop",
+        "synchronization"
+      ],
+      "provides_fields": [
+        "schedule.loop_structure",
+        "synchronization.sync_policy.after_global_to_shared_load",
+        "synchronization.sync_policy.before_shared_buffer_reuse"
+      ],
+      "requires_fields": [
+        "memory.use_shared_memory",
+        "memory.shared_A.shape",
+        "memory.shared_B.shape",
+        "memory.use_register_tile",
+        "mapping.threads_per_block",
+        "tiling.block_k"
+      ]
     },
     {
       "strategy_id": "Reordering.ThreadMapping.CoalescedLoadA",
@@ -2161,6 +2710,37 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Scheduling.PersistentCTA.GridStrideTiles",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "name": "Persistent CTA grid-stride tile scheduler",
+      "short_description": "Launch a bounded resident CTA set and let each CTA consume multiple output tiles through a grid-stride tile loop; no direct SMID dependency is required.",
+      "intent": "Launch a bounded resident CTA set and let each CTA consume multiple output tiles through a grid-stride tile loop; no direct SMID dependency is required.",
+      "risk_summary": "high",
+      "priority": 88,
+      "maturity": "v1",
+      "phase": "phase2_unlock_large_matrix",
+      "canonical_strategy_id": "Scheduling.PersistentCTA.GridStrideTiles",
+      "alias_of": null,
+      "conflict_group": "large_matrix.schedule",
+      "modifies_regions": [
+        "launch_config",
+        "index_mapping",
+        "main_loop"
+      ],
+      "provides_fields": [
+        "scheduling.persistent_cta",
+        "scheduling.tile_assignment"
+      ],
+      "requires_fields": [
+        "hardware.sm_count",
+        "tiling.block_m",
+        "tiling.block_n",
+        "mapping.threads_per_block"
+      ]
+    },
+    {
       "strategy_id": "Scheduling.PersistentCTA.StaticTileLoop",
       "stage": "Pipeline",
       "category": "Pipeline",
@@ -2182,6 +2762,36 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Tiling.BlockTile.128x128x32",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "name": "CTA tile 128x128x32",
+      "short_description": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "intent": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "risk_summary": "medium",
+      "priority": 80,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.BlockTile.128x128x32",
+      "alias_of": null,
+      "conflict_group": "tiling.block_tile",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "tiling.block_k",
+        "tiling.block_m",
+        "tiling.block_n",
+        "tiling.enabled"
+      ],
+      "requires_fields": [
+        "problem.M",
+        "problem.N",
+        "problem.K"
+      ]
+    },
+    {
       "strategy_id": "Tiling.BlockTile.128x128x8",
       "stage": "Tiling",
       "category": "Tiling",
@@ -2189,11 +2799,101 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Tiling.BlockTile.128x32x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "name": "CTA tile 128x32x16",
+      "short_description": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "intent": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "risk_summary": "low",
+      "priority": 80,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.BlockTile.128x32x16",
+      "alias_of": null,
+      "conflict_group": "tiling.block_tile",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "tiling.block_k",
+        "tiling.block_m",
+        "tiling.block_n",
+        "tiling.enabled"
+      ],
+      "requires_fields": [
+        "problem.M",
+        "problem.N",
+        "problem.K"
+      ]
+    },
+    {
       "strategy_id": "Tiling.BlockTile.128x64x16",
       "stage": "Tiling",
       "category": "Tiling",
       "subphase": "Tiling.BlockTileSelection",
       "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.128x64x32",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "name": "CTA tile 128x64x32",
+      "short_description": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "intent": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "risk_summary": "medium",
+      "priority": 80,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.BlockTile.128x64x32",
+      "alias_of": null,
+      "conflict_group": "tiling.block_tile",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "tiling.block_k",
+        "tiling.block_m",
+        "tiling.block_n",
+        "tiling.enabled"
+      ],
+      "requires_fields": [
+        "problem.M",
+        "problem.N",
+        "problem.K"
+      ]
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.32x128x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "name": "CTA tile 32x128x16",
+      "short_description": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "intent": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "risk_summary": "low",
+      "priority": 80,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.BlockTile.32x128x16",
+      "alias_of": null,
+      "conflict_group": "tiling.block_tile",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "tiling.block_k",
+        "tiling.block_m",
+        "tiling.block_n",
+        "tiling.enabled"
+      ],
+      "requires_fields": [
+        "problem.M",
+        "problem.N",
+        "problem.K"
+      ]
     },
     {
       "strategy_id": "Tiling.BlockTile.32x32x8",
@@ -2217,11 +2917,101 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Tiling.BlockTile.64x128x32",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "name": "CTA tile 64x128x32",
+      "short_description": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "intent": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "risk_summary": "medium",
+      "priority": 80,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.BlockTile.64x128x32",
+      "alias_of": null,
+      "conflict_group": "tiling.block_tile",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "tiling.block_k",
+        "tiling.block_m",
+        "tiling.block_n",
+        "tiling.enabled"
+      ],
+      "requires_fields": [
+        "problem.M",
+        "problem.N",
+        "problem.K"
+      ]
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.64x32x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "name": "CTA tile 64x32x16",
+      "short_description": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "intent": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "risk_summary": "low",
+      "priority": 80,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.BlockTile.64x32x16",
+      "alias_of": null,
+      "conflict_group": "tiling.block_tile",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "tiling.block_k",
+        "tiling.block_m",
+        "tiling.block_n",
+        "tiling.enabled"
+      ],
+      "requires_fields": [
+        "problem.M",
+        "problem.N",
+        "problem.K"
+      ]
+    },
+    {
       "strategy_id": "Tiling.BlockTile.64x64x16",
       "stage": "Tiling",
       "category": "Tiling",
       "subphase": "Tiling.BlockTileSelection",
       "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.BlockTile.64x64x32",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.BlockTileSelection",
+      "name": "CTA tile 64x64x32",
+      "short_description": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "intent": "Choose a concrete CTA output tile and K-slice depth; downstream warp/thread tiling and resource checks determine final viability.",
+      "risk_summary": "medium",
+      "priority": 80,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.BlockTile.64x64x32",
+      "alias_of": null,
+      "conflict_group": "tiling.block_tile",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "tiling.block_k",
+        "tiling.block_m",
+        "tiling.block_n",
+        "tiling.enabled"
+      ],
+      "requires_fields": [
+        "problem.M",
+        "problem.N",
+        "problem.K"
+      ]
     },
     {
       "strategy_id": "Tiling.ThreadTile.2x2",
@@ -2231,6 +3021,99 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Tiling.ThreadTile.2x4",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "name": "Per-thread 2x4 register tile",
+      "short_description": "Choose an asymmetric per-thread output fragment; the controller derives WMITER/WNITER and validates complete warp coverage.",
+      "intent": "Choose an asymmetric per-thread output fragment; the controller derives WMITER/WNITER and validates complete warp coverage.",
+      "risk_summary": "low",
+      "priority": 83,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.ThreadTile.2x4",
+      "alias_of": null,
+      "conflict_group": "tiling.thread_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing",
+        "register_file"
+      ],
+      "provides_fields": [
+        "memory.use_register_tile",
+        "tiling.thread_m",
+        "tiling.thread_n"
+      ],
+      "requires_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n",
+        "hardware.warp_size"
+      ]
+    },
+    {
+      "strategy_id": "Tiling.ThreadTile.2x8",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "name": "Per-thread 2x8 register tile",
+      "short_description": "Choose an asymmetric per-thread output fragment; the controller derives WMITER/WNITER and validates complete warp coverage.",
+      "intent": "Choose an asymmetric per-thread output fragment; the controller derives WMITER/WNITER and validates complete warp coverage.",
+      "risk_summary": "medium",
+      "priority": 81,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.ThreadTile.2x8",
+      "alias_of": null,
+      "conflict_group": "tiling.thread_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing",
+        "register_file"
+      ],
+      "provides_fields": [
+        "memory.use_register_tile",
+        "tiling.thread_m",
+        "tiling.thread_n"
+      ],
+      "requires_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n",
+        "hardware.warp_size"
+      ]
+    },
+    {
+      "strategy_id": "Tiling.ThreadTile.4x2",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "name": "Per-thread 4x2 register tile",
+      "short_description": "Choose an asymmetric per-thread output fragment; the controller derives WMITER/WNITER and validates complete warp coverage.",
+      "intent": "Choose an asymmetric per-thread output fragment; the controller derives WMITER/WNITER and validates complete warp coverage.",
+      "risk_summary": "low",
+      "priority": 83,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.ThreadTile.4x2",
+      "alias_of": null,
+      "conflict_group": "tiling.thread_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing",
+        "register_file"
+      ],
+      "provides_fields": [
+        "memory.use_register_tile",
+        "tiling.thread_m",
+        "tiling.thread_n"
+      ],
+      "requires_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n",
+        "hardware.warp_size"
+      ]
+    },
+    {
       "strategy_id": "Tiling.ThreadTile.4x4",
       "stage": "Tiling",
       "category": "Tiling",
@@ -2238,11 +3121,162 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Tiling.ThreadTile.4x8",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "name": "Per-thread 4x8 rectangular register tile",
+      "short_description": "Increase accumulator reuse along N while retaining a moderate M extent; the stage controller derives warp iteration fields from the selected warp tile.",
+      "intent": "Increase accumulator reuse along N while retaining a moderate M extent; the stage controller derives warp iteration fields from the selected warp tile.",
+      "risk_summary": "medium",
+      "priority": 82,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.ThreadTile.4x8",
+      "alias_of": null,
+      "conflict_group": "tiling.thread_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing",
+        "register_file"
+      ],
+      "provides_fields": [
+        "memory.use_register_tile",
+        "tiling.thread_m",
+        "tiling.thread_n"
+      ],
+      "requires_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n",
+        "hardware.warp_size"
+      ]
+    },
+    {
+      "strategy_id": "Tiling.ThreadTile.8x2",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "name": "Per-thread 8x2 register tile",
+      "short_description": "Choose an asymmetric per-thread output fragment; the controller derives WMITER/WNITER and validates complete warp coverage.",
+      "intent": "Choose an asymmetric per-thread output fragment; the controller derives WMITER/WNITER and validates complete warp coverage.",
+      "risk_summary": "medium",
+      "priority": 81,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.ThreadTile.8x2",
+      "alias_of": null,
+      "conflict_group": "tiling.thread_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing",
+        "register_file"
+      ],
+      "provides_fields": [
+        "memory.use_register_tile",
+        "tiling.thread_m",
+        "tiling.thread_n"
+      ],
+      "requires_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n",
+        "hardware.warp_size"
+      ]
+    },
+    {
+      "strategy_id": "Tiling.ThreadTile.8x4",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.ThreadTileSelection",
+      "name": "Per-thread 8x4 rectangular register tile",
+      "short_description": "Increase accumulator reuse along M while retaining a moderate N extent; this complements tall CTA and warp tiles.",
+      "intent": "Increase accumulator reuse along M while retaining a moderate N extent; this complements tall CTA and warp tiles.",
+      "risk_summary": "medium",
+      "priority": 82,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.ThreadTile.8x4",
+      "alias_of": null,
+      "conflict_group": "tiling.thread_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing",
+        "register_file"
+      ],
+      "provides_fields": [
+        "memory.use_register_tile",
+        "tiling.thread_m",
+        "tiling.thread_n"
+      ],
+      "requires_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n",
+        "hardware.warp_size"
+      ]
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.16x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "name": "Warp tile 16x16",
+      "short_description": "Partition the selected CTA tile into a concrete warp output tile while preserving exact divisibility and warp-level output coverage.",
+      "intent": "Partition the selected CTA tile into a concrete warp output tile while preserving exact divisibility and warp-level output coverage.",
+      "risk_summary": "low",
+      "priority": 79,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.WarpTile.16x16",
+      "alias_of": null,
+      "conflict_group": "tiling.warp_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing"
+      ],
+      "provides_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n"
+      ],
+      "requires_fields": [
+        "tiling.block_m",
+        "tiling.block_n",
+        "hardware.warp_size"
+      ]
+    },
+    {
       "strategy_id": "Tiling.WarpTile.16x32",
       "stage": "Tiling",
       "category": "Tiling",
       "subphase": "Tiling.WarpTileSelection",
       "maturity": "v1"
+    },
+    {
+      "strategy_id": "Tiling.WarpTile.16x64",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "name": "Warp tile 16x64",
+      "short_description": "Partition the selected CTA tile into a concrete warp output tile while preserving exact divisibility and warp-level output coverage.",
+      "intent": "Partition the selected CTA tile into a concrete warp output tile while preserving exact divisibility and warp-level output coverage.",
+      "risk_summary": "low",
+      "priority": 79,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.WarpTile.16x64",
+      "alias_of": null,
+      "conflict_group": "tiling.warp_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing"
+      ],
+      "provides_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n"
+      ],
+      "requires_fields": [
+        "tiling.block_m",
+        "tiling.block_n",
+        "hardware.warp_size"
+      ]
     },
     {
       "strategy_id": "Tiling.WarpTile.32x32",
@@ -2259,6 +3293,35 @@
       "maturity": "v1"
     },
     {
+      "strategy_id": "Tiling.WarpTile.64x16",
+      "stage": "Tiling",
+      "category": "Tiling",
+      "subphase": "Tiling.WarpTileSelection",
+      "name": "Warp tile 64x16",
+      "short_description": "Partition the selected CTA tile into a concrete warp output tile while preserving exact divisibility and warp-level output coverage.",
+      "intent": "Partition the selected CTA tile into a concrete warp output tile while preserving exact divisibility and warp-level output coverage.",
+      "risk_summary": "low",
+      "priority": 79,
+      "maturity": "v1",
+      "phase": "phase1_core_coupled",
+      "canonical_strategy_id": "Tiling.WarpTile.64x16",
+      "alias_of": null,
+      "conflict_group": "tiling.warp_tile",
+      "modifies_regions": [
+        "launch_config",
+        "tile_indexing"
+      ],
+      "provides_fields": [
+        "tiling.warp_tile.warp_m",
+        "tiling.warp_tile.warp_n"
+      ],
+      "requires_fields": [
+        "tiling.block_m",
+        "tiling.block_n",
+        "hardware.warp_size"
+      ]
+    },
+    {
       "strategy_id": "Tiling.WarpTile.64x32",
       "stage": "Tiling",
       "category": "Tiling",
@@ -2270,13 +3333,6 @@
       "stage": "Tiling",
       "category": "Tiling",
       "subphase": "Tiling.WarpTileSelection",
-      "maturity": "v1"
-    },
-    {
-      "strategy_id": "Tiling.WarpTile.Iteration.WMITERxWNITER",
-      "stage": "Tiling",
-      "category": "Tiling",
-      "subphase": "Tiling.ThreadTileSelection",
       "maturity": "v1"
     },
     {
@@ -2298,7 +3354,28 @@
       "stage": "Compiler",
       "category": "Compiler",
       "subphase": "Compiler.ResourceTuning",
-      "maturity": "v1"
+      "name": "Tuning.WarpOccupancyBalance",
+      "short_description": "Tune launch bounds using actual launch thread count, registers, shared bytes and SM residency; require a kernel-declaration edit boundary and measured spills/latency, not merely compiler.attributes != null.",
+      "intent": "Tune launch bounds using actual launch thread count, registers, shared bytes and SM residency; require a kernel-declaration edit boundary and measured spills/latency, not merely compiler.attributes != null.",
+      "risk_summary": "medium",
+      "priority": 50,
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "canonical_strategy_id": "Tuning.WarpOccupancyBalance",
+      "alias_of": null,
+      "conflict_group": "compiler.launch_bounds",
+      "modifies_regions": [
+        "kernel_declaration"
+      ],
+      "provides_fields": [],
+      "requires_fields": [
+        "mapping.threads_per_block"
+      ],
+      "activation_status": "executor_required",
+      "materialization": {
+        "mode": "orchestrator_required",
+        "llm_required": false
+      }
     },
     {
       "strategy_id": "Vectorization.AlignmentGuard",
@@ -2362,6 +3439,198 @@
       "category": "Epilogue",
       "subphase": "Epilogue.StorePolicy",
       "maturity": "v1"
+    },
+    {
+      "strategy_id": "Pipeline.CpAsync.Multistage2.SharedAB",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.BufferingSelection",
+      "name": "2-stage cp.async shared-memory pipeline",
+      "short_description": "Overlap FP32 SIMT computation with asynchronous global-to-shared copies across 2 stages; balance latency hiding against shared-memory residency.",
+      "intent": "Overlap FP32 SIMT computation with asynchronous global-to-shared copies across 2 stages; balance latency hiding against shared-memory residency.",
+      "risk_summary": "high",
+      "priority": 97,
+      "maturity": "v1",
+      "phase": "phase2_unlock_general",
+      "canonical_strategy_id": "Pipeline.CpAsync.Multistage2.SharedAB",
+      "alias_of": null,
+      "conflict_group": "pipeline.buffering",
+      "modifies_regions": [
+        "shared_decl",
+        "global_to_shared_load",
+        "main_loop",
+        "sync_after_load"
+      ],
+      "provides_fields": [
+        "pipeline.async_copy",
+        "pipeline.copy_mechanism",
+        "pipeline.double_buffering",
+        "pipeline.enabled",
+        "pipeline.stage_count",
+        "resource.shared_memory.pipeline_multiplier"
+      ],
+      "requires_fields": [
+        "hardware.supports_cp_async",
+        "memory.use_shared_memory",
+        "resource.shared_memory.total_bytes"
+      ],
+      "materialization": {
+        "mode": "llm_structured_patch",
+        "llm_required": true,
+        "scope": "local_anchor_regions_only"
+      }
+    },
+    {
+      "strategy_id": "Memory.SharedMemory.DynamicOptIn",
+      "stage": "Layout",
+      "category": "Layout",
+      "subphase": "Layout.SharedMemoryTransform",
+      "name": "Dynamic shared-memory opt-in",
+      "short_description": "Materialize the existing layout in dynamic shared memory; configure the actual specialized kernel's allocation at launch. No precision or tiling change.",
+      "intent": "Materialize the existing layout in dynamic shared memory; configure the actual specialized kernel's allocation at launch. No precision or tiling change.",
+      "risk_summary": "medium",
+      "priority": 94,
+      "maturity": "v1",
+      "phase": "phase2_unlock_general",
+      "canonical_strategy_id": "Memory.SharedMemory.DynamicOptIn",
+      "alias_of": null,
+      "conflict_group": "shared_memory.allocation",
+      "modifies_regions": [
+        "shared_decl",
+        "launch_config"
+      ],
+      "provides_fields": [
+        "memory.shared_memory_allocation",
+        "memory.shared_memory_optin"
+      ],
+      "requires_fields": [
+        "hardware.supports_shared_memory_optin",
+        "memory.use_shared_memory"
+      ],
+      "materialization": {
+        "mode": "llm_structured_patch",
+        "llm_required": true,
+        "scope": "local_anchor_regions_only"
+      }
+    },
+    {
+      "strategy_id": "Memory.SharedMemory.Carveout.0",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "name": "Shared/L1 carveout preference 0 percent",
+      "short_description": "Request a supported shared/L1 partition preference on the actual kernel, then compare measured correct performance; maximum shared is not always fastest.",
+      "intent": "Request a supported shared/L1 partition preference on the actual kernel, then compare measured correct performance; maximum shared is not always fastest.",
+      "risk_summary": "low",
+      "priority": 65,
+      "maturity": "v1",
+      "phase": "phase2_unlock_general",
+      "canonical_strategy_id": "Memory.SharedMemory.Carveout.0",
+      "alias_of": null,
+      "conflict_group": "shared_memory.carveout",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "memory.shared_memory_carveout_percent"
+      ],
+      "requires_fields": [
+        "memory.use_shared_memory"
+      ],
+      "materialization": {
+        "mode": "host_launch_config",
+        "llm_required": false
+      }
+    },
+    {
+      "strategy_id": "Memory.SharedMemory.Carveout.50",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "name": "Shared/L1 carveout preference 50 percent",
+      "short_description": "Request a supported shared/L1 partition preference on the actual kernel, then compare measured correct performance; maximum shared is not always fastest.",
+      "intent": "Request a supported shared/L1 partition preference on the actual kernel, then compare measured correct performance; maximum shared is not always fastest.",
+      "risk_summary": "low",
+      "priority": 65,
+      "maturity": "v1",
+      "phase": "phase2_unlock_general",
+      "canonical_strategy_id": "Memory.SharedMemory.Carveout.50",
+      "alias_of": null,
+      "conflict_group": "shared_memory.carveout",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "memory.shared_memory_carveout_percent"
+      ],
+      "requires_fields": [
+        "memory.use_shared_memory"
+      ],
+      "materialization": {
+        "mode": "host_launch_config",
+        "llm_required": false
+      }
+    },
+    {
+      "strategy_id": "Memory.SharedMemory.Carveout.100",
+      "stage": "Compiler",
+      "category": "Compiler",
+      "subphase": "Compiler.AttributeSelection",
+      "name": "Shared/L1 carveout preference 100 percent",
+      "short_description": "Request a supported shared/L1 partition preference on the actual kernel, then compare measured correct performance; maximum shared is not always fastest.",
+      "intent": "Request a supported shared/L1 partition preference on the actual kernel, then compare measured correct performance; maximum shared is not always fastest.",
+      "risk_summary": "low",
+      "priority": 65,
+      "maturity": "v1",
+      "phase": "phase2_unlock_general",
+      "canonical_strategy_id": "Memory.SharedMemory.Carveout.100",
+      "alias_of": null,
+      "conflict_group": "shared_memory.carveout",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "memory.shared_memory_carveout_percent"
+      ],
+      "requires_fields": [
+        "memory.use_shared_memory"
+      ],
+      "materialization": {
+        "mode": "host_launch_config",
+        "llm_required": false
+      }
+    },
+    {
+      "strategy_id": "Memory.L2Persistence.AccessWindow",
+      "stage": "Pipeline",
+      "category": "Pipeline",
+      "subphase": "Pipeline.LargeMatrixScheduling",
+      "name": "L2 persisting access-policy window",
+      "short_description": "Configure a bounded A or B reuse window and restore prior stream/context policy after use; distinct from CTA swizzling.",
+      "intent": "Configure a bounded A or B reuse window and restore prior stream/context policy after use; distinct from CTA swizzling.",
+      "risk_summary": "medium",
+      "priority": 60,
+      "maturity": "v1",
+      "phase": "excluded_default",
+      "canonical_strategy_id": "Memory.L2Persistence.AccessWindow",
+      "alias_of": null,
+      "conflict_group": "memory.l2_access_window",
+      "modifies_regions": [
+        "launch_config"
+      ],
+      "provides_fields": [
+        "memory.l2_persistence.enabled"
+      ],
+      "requires_fields": [
+        "hardware.max_persisting_l2_cache_bytes",
+        "hardware.max_access_policy_window_bytes"
+      ],
+      "activation_status": "executor_required",
+      "materialization": {
+        "mode": "orchestrator_required",
+        "llm_required": false
+      }
     }
-  ]
+  ],
+  "strategy_count": 136
 }

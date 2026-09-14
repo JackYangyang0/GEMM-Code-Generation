@@ -648,8 +648,8 @@ def extract_launch_config_from_ir(ir: dict[str, Any]) -> dict[str, int]:
         "BK": int(tiling.get("block_k") or 8),
         "WM": int(warp_tile.get("warp_m") or 32),
         "WN": int(warp_tile.get("warp_n") or 32),
-        "WMITER": int(tiling.get("warp_m_iter") or 4),
-        "WNITER": int(tiling.get("warp_n_iter") or 4),
+        "WMITER": int(warp_tile.get("warp_m_iter") or tiling.get("warp_m_iter") or 4),
+        "WNITER": int(warp_tile.get("warp_n_iter") or tiling.get("warp_n_iter") or 4),
         "TM": int(tiling.get("thread_m") or 2),
         "TN": int(tiling.get("thread_n") or 2),
     }
@@ -966,12 +966,6 @@ __global__ void gemm(
     /*
      * INDEX_MAPPING_BEGIN
      */
-    const int load_a_smem_m = tid / (BK / 4);
-    const int load_a_smem_k = (tid % (BK / 4)) * 4;
-    const int load_b_smem_k = tid / (BN / 4);
-    const int load_b_smem_n = (tid % (BN / 4)) * 4;
-    const int hightA = thread_num / (BK / 4);
-    const int hightB = thread_num / (BN / 4);
     const int Wrow = wid / (BN / WN);
     const int Wcol = wid % (BN / WN);
     const int Trow = lane / (WNITER / TN);
@@ -998,16 +992,19 @@ __global__ void gemm(
     /*
      * GLOBAL_TO_SHARED_LOAD_BEGIN
      */
-    for (int loadOffset = 0; loadOffset < BM; loadOffset += hightA) {{
-        float4 tmp = FLOAT4(A[OFFSET(load_a_smem_m + loadOffset, load_a_smem_k, K) + A_offset]);
-        As[0][load_a_smem_k][load_a_smem_m + loadOffset] = tmp.x;
-        As[0][load_a_smem_k + 1][load_a_smem_m + loadOffset] = tmp.y;
-        As[0][load_a_smem_k + 2][load_a_smem_m + loadOffset] = tmp.z;
-        As[0][load_a_smem_k + 3][load_a_smem_m + loadOffset] = tmp.w;
+    for (int loadIdx = tid * 4; loadIdx < BM * BK; loadIdx += thread_num * 4) {{
+        const int load_m = loadIdx / BK;
+        const int load_k = loadIdx % BK;
+        const float4 tmp = FLOAT4(A[OFFSET(load_m, load_k, K) + A_offset]);
+        As[0][load_k][load_m] = tmp.x;
+        As[0][load_k + 1][load_m] = tmp.y;
+        As[0][load_k + 2][load_m] = tmp.z;
+        As[0][load_k + 3][load_m] = tmp.w;
     }}
-    for (int loadOffset = 0; loadOffset < BK; loadOffset += hightB) {{
-        FLOAT4(Bs[0][load_b_smem_k + loadOffset][load_b_smem_n]) =
-            FLOAT4(B[OFFSET(load_b_smem_k + loadOffset, load_b_smem_n, N) + B_offset]);
+    for (int loadIdx = tid * 4; loadIdx < BK * BN; loadIdx += thread_num * 4) {{
+        const int load_k = loadIdx / BN;
+        const int load_n = loadIdx % BN;
+        FLOAT4(Bs[0][load_k][load_n]) = FLOAT4(B[OFFSET(load_k, load_n, N) + B_offset]);
     }}
     /*
      * GLOBAL_TO_SHARED_LOAD_END
@@ -1061,16 +1058,20 @@ __global__ void gemm(
         /*
          * GLOBAL_TO_SHARED_LOAD_BEGIN
          */
-        for (int loadOffset = 0; loadOffset < BM; loadOffset += hightA) {{
-            float4 tmp = FLOAT4(A[OFFSET(load_a_smem_m + loadOffset, load_a_smem_k + bkIdx * BK, K) + A_offset]);
-            As[mem_flag][load_a_smem_k][load_a_smem_m + loadOffset] = tmp.x;
-            As[mem_flag][load_a_smem_k + 1][load_a_smem_m + loadOffset] = tmp.y;
-            As[mem_flag][load_a_smem_k + 2][load_a_smem_m + loadOffset] = tmp.z;
-            As[mem_flag][load_a_smem_k + 3][load_a_smem_m + loadOffset] = tmp.w;
+        for (int loadIdx = tid * 4; loadIdx < BM * BK; loadIdx += thread_num * 4) {{
+            const int load_m = loadIdx / BK;
+            const int load_k = loadIdx % BK;
+            const float4 tmp = FLOAT4(A[OFFSET(load_m, load_k + bkIdx * BK, K) + A_offset]);
+            As[mem_flag][load_k][load_m] = tmp.x;
+            As[mem_flag][load_k + 1][load_m] = tmp.y;
+            As[mem_flag][load_k + 2][load_m] = tmp.z;
+            As[mem_flag][load_k + 3][load_m] = tmp.w;
         }}
-        for (int loadOffset = 0; loadOffset < BK; loadOffset += hightB) {{
-            FLOAT4(Bs[mem_flag][load_b_smem_k + loadOffset][load_b_smem_n]) =
-                FLOAT4(B[OFFSET(load_b_smem_k + loadOffset + bkIdx * BK, load_b_smem_n, N) + B_offset]);
+        for (int loadIdx = tid * 4; loadIdx < BK * BN; loadIdx += thread_num * 4) {{
+            const int load_k = loadIdx / BN;
+            const int load_n = loadIdx % BN;
+            FLOAT4(Bs[mem_flag][load_k][load_n]) =
+                FLOAT4(B[OFFSET(load_k + bkIdx * BK, load_n, N) + B_offset]);
         }}
         /*
          * GLOBAL_TO_SHARED_LOAD_END

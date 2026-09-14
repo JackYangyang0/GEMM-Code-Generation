@@ -19,6 +19,12 @@ DEFAULT_OUTPUT_IR = ROOT / "data" / "IRs" / "ir_patch" / "optir.diagnosed.json"
 
 RUNTIME_ERROR_RULES = [
     {
+        "patterns": ["compute-sanitizer racecheck failed", "compute-sanitizer synccheck failed"],
+        "defect_type": "Pipeline.AsyncSynchronizationViolation",
+        "related_fields": ["pipeline.stage_count", "pipeline.async_copy", "synchronization.sync_policy"],
+        "repair_action": "inspect the sanitizer report; correct commit/wait ordering, uniform CTA synchronization and stage-buffer reuse, then rerun; do not repair by merely disabling the checker",
+    },
+    {
         "patterns": ["returncode=-11", "returncode=139", "segmentation fault"],
         "defect_type": "Runtime.HostSegmentationFault",
         "related_fields": [
@@ -130,6 +136,10 @@ RUNTIME_ERROR_RULES = [
 
 
 CHECK_FAILURE_RULES = {
+    "Pipeline.AsyncCopyProtocolMissing": {
+        "related_fields": ["pipeline.async_copy", "pipeline.stage_count", "resource.shared_memory"],
+        "repair_action": "materialize cp.async or an equivalent CUDA async-copy API with commit/wait; preserve alignment, tail zero-fill, CTA-wide synchronization before consumption and before buffer reuse; handle short K and drain outstanding copies, or fall back to fewer stages/synchronous buffering",
+    },
     "Resource.ThreadBlockOverflow": {
         "related_fields": [
             "tiling.block_m",
@@ -291,6 +301,8 @@ def diagnose_defects(ir: dict[str, Any], post_check: dict[str, Any] | None = Non
     defects.extend(diagnose_compile(ir, strategy_id))
     defects.extend(diagnose_code_semantics(ir, strategy_id))
     defects.extend(diagnose_correctness(ir, strategy_id))
+    for report in (ir.get("code_verification", {}).get("strategy_reports", []) or []):
+        defects.extend(diagnose_post_check(report, report.get("strategy_id") or strategy_id))
 
     unique_defects = deduplicate_defects(defects)
     return {

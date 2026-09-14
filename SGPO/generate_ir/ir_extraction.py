@@ -429,6 +429,7 @@ def normalize_cpu_cache(cache: dict[str, Any], physical_cores: Any) -> dict[str,
 
 
 def probe_local_hardware(template_hardware: dict[str, Any]) -> dict[str, Any]:
+    from SGPO.generate_ir.cuda_device_probe import query_cuda_attributes
     smi = query_nvidia_smi()
     device = query_device_query()
     cpu_memory = query_cpu_memory()
@@ -478,6 +479,16 @@ def probe_local_hardware(template_hardware: dict[str, Any]) -> dict[str, Any]:
         }
     )
 
+    attributes = query_cuda_attributes()
+    hardware.update(attributes)
+    if isinstance(hardware.get("gpu"), dict):
+        hardware["gpu"].update(attributes)
+    cc_major = hardware.get("compute_capability_major")
+    hardware["supports_shared_memory_optin"] = bool(
+        attributes.get("max_shared_memory_per_block_optin_bytes", 0)
+        > attributes.get("max_shared_memory_per_block_bytes", 0)
+    )
+    hardware["supports_l2_persistence"] = bool(attributes.get("max_persisting_l2_cache_bytes", 0))
     hardware["supports_float4"] = True
     hardware["supports_cp_async"] = bool(cc_major and cc_major >= 8)
     hardware["supports_tensor_core"] = bool(cc_major and cc_major >= 7)

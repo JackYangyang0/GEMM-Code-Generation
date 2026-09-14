@@ -110,6 +110,12 @@ def evaluate_strategy_for_index(
     if strategy.get("stage") != stage:
         return reject(f"stage mismatch: expected {stage}, got {strategy.get('stage')}")
 
+    if strategy.get("alias_of"):
+        return reject(f"alias of canonical strategy {strategy.get('alias_of')}")
+
+    if strategy.get("phase") == "excluded_default":
+        return reject("excluded_default phase")
+
     if profile_allowed_ids and strategy_id not in profile_allowed_ids:
         return reject(f"profile {profile} does not include this strategy")
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from SGPO.generate_ir.ir_checker import check_before_codegen
+from SGPO.generate_ir.gpu_resources import shared_memory_usage
 
 
 @dataclass
@@ -14,6 +15,28 @@ class LocalCheckResult:
     id: str
     status: str
     message: str
+
+
+FIELD_ALIASES = {
+    "M": "problem.M",
+    "N": "problem.N",
+    "K": "problem.K",
+    "block_m": "tiling.block_m",
+    "block_n": "tiling.block_n",
+    "block_k": "tiling.block_k",
+    "warp_m": "tiling.warp_tile.warp_m",
+    "warp_n": "tiling.warp_tile.warp_n",
+    "thread_m": "tiling.thread_m",
+    "thread_n": "tiling.thread_n",
+    "warp_m_iter": "tiling.warp_tile.warp_m_iter",
+    "warp_n_iter": "tiling.warp_tile.warp_n_iter",
+    "shared_memory_bytes": "resource.shared_memory.total_bytes",
+    "pipeline_multiplier": "resource.shared_memory.pipeline_multiplier",
+    "max_shared_memory_per_block_bytes": "hardware.max_shared_memory_per_block_bytes",
+    "threads_per_block": "mapping.threads_per_block",
+    "warps_per_block": "mapping.warps_per_block",
+    "warp_size": "hardware.warp_size",
+}
 
 
 class StageController:
@@ -109,15 +132,19 @@ class StageController:
         failed = self.history.get("failed_strategy_counts", {}) or {}
         if failed.get(strategy_id, 0) >= 2:
             return "failed too many times"
+        dependency_reason = tiling_hierarchy_reject_reason(strategy_id, self.optir)
+        if dependency_reason is not None:
+            return dependency_reason
         strategy = self.strategy_object_for_subphase(strategy_id, subphase)
         report = check_before_codegen(self.optir, strategy)
         if not report.get("strategy_applicable", False):
-            failed_ids = [
-                item.get("id")
+            failed_checks = [
+                format_precondition_rejection(item)
                 for item in report.get("results", []) or []
-                if item.get("status") == "fail"
+                if item.get("status") in {"fail", "unknown"}
             ]
-            return "preconditions failed: " + ", ".join(str(item) for item in failed_ids[:3])
+            details = ", ".join(failed_checks[:3]) or "checker returned strategy_applicable=false without details"
+            return "preconditions failed: " + details
         missing = [
             field
             for field in subphase.get("requires_fields", []) or []
@@ -126,6 +153,7 @@ class StageController:
         if missing:
             return f"missing required fields: {', '.join(missing)}"
         return None
+
 
     def strategy_object(self, strategy_id: str) -> dict[str, Any]:
         subphase = self.current_subphase() or {}
@@ -207,7 +235,7 @@ class StageController:
         }
         return next_ir
 
-    def verify_stage(self, optir: dict[str, Any] | None = None) -> dict[str, Any]:
+    def verify_stage(self, optir: dict[str, Any] | None = None, include_code_checks: bool = True) -> dict[str, Any]:
         ir = optir or self.optir
         stage_verification = get_stage_verification(self.stage_spec)
         predicates = stage_verification.get("predicates") or stage_verification.get("stage_completion_predicates") or []
@@ -221,7 +249,8 @@ class StageController:
                 results.append(evaluate_text_condition(ir, predicate))
             else:
                 results.append(evaluate_predicate_like(ir, predicate))
-        results.extend(run_stage_static_code_checks(self.current_stage, ir))
+        if include_code_checks:
+            results.extend(run_stage_static_code_checks(self.current_stage, ir))
         return {
             "stage": self.current_stage,
             "subphase": f"{self.current_stage}.StageVerification",
@@ -487,8 +516,6 @@ def synthesize_ir_updates(strategy_id: str) -> dict[str, Any]:
     if thread:
         tm, tn = map(int, thread.groups())
         updates.update({"tiling.thread_m": tm, "tiling.thread_n": tn})
-    if strategy_id == "Tiling.WarpTile.Iteration.WMITERxWNITER":
-        updates.update({"tiling.warp_tile.warp_m_iter": 1, "tiling.warp_tile.warp_n_iter": 1})
     if strategy_id.startswith("Mapping.Warp"):
         updates.update({"mapping.warp.enabled": True, "mapping.thread_to_output": "warp_thread_tile", "mapping.warp_to_output": "2d_tile"})
     if strategy_id == "Mapping.Warp.BasicWidLane":
@@ -497,6 +524,26 @@ def synthesize_ir_updates(strategy_id: str) -> dict[str, Any]:
         updates.update({
             "mapping.thread_to_output": "warp_lane_fragment_tile",
             "mapping.lane_layout": "warp_lane_fragment_2d" if strategy_id.endswith("2D") else "warp_lane_fragment_basic",
+        })
+    if strategy_id == "Mapping.LaneLayout.2D_8x4":
+        updates.update({
+            "mapping.warp.enabled": True,
+            "mapping.warp_to_output": "2d_warp_tile",
+            "mapping.lane_layout": "lane_2d_8x4",
+            "mapping.lane_m": 8,
+            "mapping.lane_n": 4,
+        })
+    if strategy_id == "Mapping.LaneLayout.1DContiguousM":
+        updates.update({
+            "mapping.warp.enabled": True,
+            "mapping.warp_to_output": "2d_warp_tile",
+            "mapping.lane_layout": "lane_1d_contiguous_m",
+        })
+    if strategy_id == "Mapping.LaneLayout.1DContiguousN":
+        updates.update({
+            "mapping.warp.enabled": True,
+            "mapping.warp_to_output": "2d_warp_tile",
+            "mapping.lane_layout": "lane_1d_contiguous_n",
         })
     if strategy_id == "Layout.SharedMemory.AB.Basic":
         updates.update({
@@ -524,6 +571,7 @@ def synthesize_ir_updates(strategy_id: str) -> dict[str, Any]:
         updates.update({
             "schedule.loop_structure": "separate_load_compute",
             "synchronization.sync_policy.after_global_to_shared_load": True,
+            "synchronization.sync_policy.before_shared_buffer_reuse": True,
         })
     if strategy_id.startswith("Reordering.ThreadMapping.CoalescedLoad"):
         target = "A" if strategy_id.endswith("A") else "B" if strategy_id.endswith("B") else "AB"
@@ -588,6 +636,11 @@ def synthesize_ir_updates(strategy_id: str) -> dict[str, Any]:
             "vectorization.C.vector_width": vector_width_from_strategy(strategy_id, default=1),
             "memory.global_store_C.pattern": strategy_id,
         })
+    if strategy_id == "Mapping.WarpStore.CoalescedC":
+        updates.update({
+            "vectorization.C.vector_width": 1,
+            "memory.global_store_C.pattern": strategy_id,
+        })
     if strategy_id.startswith("Epilogue.AlphaBeta."):
         updates["epilogue.mode"] = "alpha_beta_general"
     if strategy_id.startswith("Epilogue.BetaZero"):
@@ -599,7 +652,8 @@ def synthesize_ir_updates(strategy_id: str) -> dict[str, Any]:
     if strategy_id.startswith("Pipeline.DoubleBuffer") or strategy_id.startswith("Pipeline.WarpAwareDoubleBuffer"):
         updates.update({"pipeline.enabled": True, "pipeline.stage_count": 2, "pipeline.double_buffering": True, "resource.shared_memory.pipeline_multiplier": 2})
     if strategy_id == "Pipeline.NoAsyncCopy.V1":
-        updates.update({"pipeline.enabled": False, "pipeline.stage_count": 1, "pipeline.double_buffering": False, "resource.shared_memory.pipeline_multiplier": 1})
+        # This is a construction choice, not a rollback of existing buffering.
+        pass
     if strategy_id.startswith("Memory.Prefetch.") or strategy_id == "Pipeline.WarpRegisterPrefetchAB":
         updates.update({"pipeline.prefetch": strategy_id, "resource.register.prefetch_enabled": True})
     if strategy_id.startswith("Mapping.CTASwizzle."):
@@ -1054,17 +1108,13 @@ def derive_fields(ir: dict[str, Any], subphase_id: str | None = None, strategy_i
         set_field_meta(ir, "mapping.warps_per_block", "derived", True, strategy_id, subphase_id)
         set_field_meta(ir, "mapping.threads_per_block", "derived", True, strategy_id, subphase_id)
     if wm and wn and tm and tn and thread_tile_is_resolved(ir):
-        outputs_per_warp = wm * wn
-        outputs_per_thread_base = warp_size * tm * tn
-        if outputs_per_thread_base and outputs_per_warp % outputs_per_thread_base == 0:
-            iter_product = outputs_per_warp // outputs_per_thread_base
-            if iteration_fields_are_auto(ir):
-                set_path(ir, "tiling.warp_tile.warp_m_iter", 1)
-                set_path(ir, "tiling.warp_tile.warp_n_iter", max(1, iter_product))
-                set_field_meta(ir, "tiling.warp_tile.warp_m_iter", "derived_default", True, f"{subphase_id}.default_iteration" if subphase_id else strategy_id, subphase_id)
-                set_field_meta(ir, "tiling.warp_tile.warp_n_iter", "derived_default", True, f"{subphase_id}.default_iteration" if subphase_id else strategy_id, subphase_id)
-                wmi = 1
-                wni = max(1, iter_product)
+        warp_iter = choose_warp_iteration_extents(wm, wn, tm, tn, warp_size)
+        if warp_iter and (iteration_fields_are_auto(ir) or not warp_iteration_is_valid(wm, wn, tm, tn, wmi, wni, warp_size)):
+            wmi, wni = warp_iter
+            set_path(ir, "tiling.warp_tile.warp_m_iter", wmi)
+            set_path(ir, "tiling.warp_tile.warp_n_iter", wni)
+            set_field_meta(ir, "tiling.warp_tile.warp_m_iter", "derived_default", True, f"{subphase_id}.default_iteration" if subphase_id else strategy_id, subphase_id)
+            set_field_meta(ir, "tiling.warp_tile.warp_n_iter", "derived_default", True, f"{subphase_id}.default_iteration" if subphase_id else strategy_id, subphase_id)
     if tm and tn:
         set_path(ir, "mapping.outputs_per_thread", tm * tn * wmi * wni)
         set_path(ir, "mapping.outputs_per_warp", warp_size * tm * tn * wmi * wni)
@@ -1076,6 +1126,78 @@ def derive_fields(ir: dict[str, Any], subphase_id: str | None = None, strategy_i
 
 def thread_tile_is_resolved(ir: dict[str, Any]) -> bool:
     return field_is_resolved(ir, "tiling.thread_m") and field_is_resolved(ir, "tiling.thread_n")
+
+
+def tiling_hierarchy_reject_reason(strategy_id: str, ir: dict[str, Any]) -> str | None:
+    if strategy_id in {
+        "Tiling.WarpTile.WMxWN",
+        "Tiling.WarpTile.ParametricWMxWN",
+    }:
+        return "parametric WarpTile placeholders are not selectable in hierarchical concrete tiling search"
+
+    warp = re.fullmatch(r"Tiling\.WarpTile\.(\d+)x(\d+)", strategy_id)
+    if warp:
+        bm = coerce_int(get_path(ir, "tiling.block_m"))
+        bn = coerce_int(get_path(ir, "tiling.block_n"))
+        if bm is None or bn is None:
+            return "BlockTile must be selected before WarpTile"
+        wm, wn = map(int, warp.groups())
+        if bm % wm != 0 or bn % wn != 0:
+            return f"WarpTile {wm}x{wn} does not divide BlockTile {bm}x{bn}"
+        warp_size = coerce_int(get_path(ir, "hardware.warp_size")) or 32
+        max_threads = coerce_int(get_path(ir, "hardware.max_threads_per_block")) or 1024
+        threads = (bm // wm) * (bn // wn) * warp_size
+        if threads > max_threads:
+            return f"derived threads_per_block {threads} exceeds hardware limit {max_threads}"
+
+    thread = re.fullmatch(r"Tiling\.ThreadTile\.(\d+)x(\d+)", strategy_id)
+    if thread:
+        wm = coerce_int(get_path(ir, "tiling.warp_tile.warp_m"))
+        wn = coerce_int(get_path(ir, "tiling.warp_tile.warp_n"))
+        if wm is None or wn is None:
+            return "WarpTile must be selected before ThreadTile"
+        tm, tn = map(int, thread.groups())
+        warp_size = coerce_int(get_path(ir, "hardware.warp_size")) or 32
+        if choose_warp_iteration_extents(wm, wn, tm, tn, warp_size) is None:
+            return f"ThreadTile {tm}x{tn} has no legal {warp_size}-lane mapping inside WarpTile {wm}x{wn}"
+    return None
+
+
+def choose_warp_iteration_extents(wm: int, wn: int, tm: int, tn: int, warp_size: int = 32) -> tuple[int, int] | None:
+    candidates: list[tuple[float, int, int, int]] = []
+    target_aspect = wm / wn if wn else 1.0
+    for wmi in divisors(wm):
+        if wmi % tm != 0:
+            continue
+        for wni in divisors(wn):
+            if wni % tn != 0:
+                continue
+            if (wmi // tm) * (wni // tn) != warp_size:
+                continue
+            aspect_penalty = abs((wmi / wni) - target_aspect) if wni else float("inf")
+            # For equal-aspect candidates, favor N-contiguous fragments because
+            # consecutive lanes then touch adjacent C/B columns more often.
+            candidates.append((aspect_penalty, -wni, -wmi, wmi, wni))
+    if not candidates:
+        return None
+    _, _, _, wmi, wni = min(candidates)
+    return wmi, wni
+
+
+def warp_iteration_is_valid(wm: int, wn: int, tm: int, tn: int, wmi: int, wni: int, warp_size: int = 32) -> bool:
+    if min(wm, wn, tm, tn, wmi, wni, warp_size) <= 0:
+        return False
+    return (
+        wm % wmi == 0
+        and wn % wni == 0
+        and wmi % tm == 0
+        and wni % tn == 0
+        and (wmi // tm) * (wni // tn) == warp_size
+    )
+
+
+def divisors(value: int) -> list[int]:
+    return [item for item in range(1, value + 1) if value % item == 0]
 
 
 def iteration_fields_are_auto(ir: dict[str, Any]) -> bool:
@@ -1091,12 +1213,10 @@ def derive_resource_fields(ir: dict[str, Any], subphase_id: str | None = None, s
     bn = coerce_int(get_path(ir, "tiling.block_n"))
     bk = coerce_int(get_path(ir, "tiling.block_k"))
     if bm and bn and bk and get_path(ir, "memory.use_shared_memory") is True:
-        padding_a = coerce_int(get_path(ir, "memory.shared_A.padding")) or 0
-        padding_b = coerce_int(get_path(ir, "memory.shared_B.padding")) or 0
-        stage_multiplier = coerce_int(get_path(ir, "resource.shared_memory.pipeline_multiplier")) or 1
-        shared_a = bk * (bm + padding_a) * 4
-        shared_b = bk * (bn + padding_b) * 4
-        set_path(ir, "resource.shared_memory.total_bytes", (shared_a + shared_b) * stage_multiplier)
+        usage = shared_memory_usage(ir)
+        set_path(ir, "resource.shared_memory.per_stage_bytes", usage["per_stage_bytes"])
+        set_path(ir, "resource.shared_memory.total_bytes",
+                 usage["per_stage_bytes"] * usage["stage_count"] + usage["auxiliary_bytes"])
         set_field_meta(ir, "resource.shared_memory.total_bytes", "derived", True, strategy_id, subphase_id)
     tm = coerce_int(get_path(ir, "tiling.thread_m")) or 1
     tn = coerce_int(get_path(ir, "tiling.thread_n")) or 1
@@ -1210,6 +1330,12 @@ def run_stage_static_code_checks(stage: str, ir: dict[str, Any]) -> list[LocalCh
 
 def check_layout_shared_memory_declarations(ir: dict[str, Any]) -> LocalCheckResult:
     code_ast = ir.get("code_ast") or {}
+    if not code_ast.get("files"):
+        return LocalCheckResult(
+            "LAYOUT_SHARED_DECLARATIONS_PRESENT",
+            "pass",
+            "code_ast is unavailable; shared declaration check deferred to compile/code verification.",
+        )
     shared_decls = []
     for file_ast in (code_ast.get("files") or {}).values():
         shared_decls.extend(file_ast.get("shared_memory") or [])
@@ -1244,6 +1370,9 @@ def is_shared_buffer_name(name: Any, candidates: list[str]) -> bool:
 
 
 def evaluate_text_condition(ir: dict[str, Any], condition: str) -> LocalCheckResult:
+    known = evaluate_known_constraint(ir, condition)
+    if known is not None:
+        return known
     if "!=" in condition and "null" in condition:
         field = condition.split("!=")[0].strip()
         ok = get_path(ir, field) is not None
@@ -1274,26 +1403,136 @@ def evaluate_text_condition(ir: dict[str, Any], condition: str) -> LocalCheckRes
     return LocalCheckResult(condition, "pass", f"deferred or informational: {condition}")
 
 
+def evaluate_known_constraint(ir: dict[str, Any], condition: str) -> LocalCheckResult | None:
+    constraint_id = condition.strip()
+    if constraint_id == "C_VECTOR_ALIGNMENT":
+        failures = []
+        for tensor in ["A", "B", "C"]:
+            node = get_path(ir, f"vectorization.{tensor}") or {}
+            width = coerce_int(node.get("vector_width")) or 1 if isinstance(node, dict) else 1
+            if width > 1 and not (node.get("alignment_guard") is True or node.get("alignment_proven") is True):
+                failures.append(tensor)
+        return LocalCheckResult(
+            constraint_id,
+            "pass" if not failures else "fail",
+            "all vectorized accesses have alignment guard or proof" if not failures else f"missing alignment guard/proof for {failures}",
+        )
+    if constraint_id == "C_VECTOR_TAIL_HANDLING":
+        static_no_guard = get_path(ir, "safety.boundary_policy") == "static_divisible_no_guard"
+        failures = []
+        for tensor in ["A", "B", "C"]:
+            node = get_path(ir, f"vectorization.{tensor}") or {}
+            width = coerce_int(node.get("vector_width")) or 1 if isinstance(node, dict) else 1
+            if width > 1 and node.get("tail_handling") is not True and not static_no_guard:
+                failures.append(tensor)
+        return LocalCheckResult(
+            constraint_id,
+            "pass" if not failures else "fail",
+            "all vectorized accesses have tail handling or static divisible policy" if not failures else f"missing tail handling for {failures}",
+        )
+    if constraint_id == "C_STORE_BOUNDARY_ALIGNMENT":
+        c_node = get_path(ir, "vectorization.C") or {}
+        width = coerce_int(c_node.get("vector_width")) or 1 if isinstance(c_node, dict) else 1
+        boundary_ok = get_path(ir, "memory.global_store_C.boundary_guard") is True or get_path(ir, "safety.boundary_policy") == "static_divisible_no_guard"
+        alignment_ok = width <= 1 or c_node.get("alignment_guard") is True or c_node.get("alignment_proven") is True
+        ok = boundary_ok and alignment_ok
+        return LocalCheckResult(
+            constraint_id,
+            "pass" if ok else "fail",
+            f"boundary_ok={boundary_ok}, alignment_ok={alignment_ok}, vector_width={width}",
+        )
+    if constraint_id == "C_SHARED_MEMORY_LIMIT":
+        shared = coerce_int(get_path(ir, "resource.shared_memory.total_bytes"))
+        limit = coerce_int(get_path(ir, "hardware.max_shared_memory_per_block_bytes"))
+        ok = shared is not None and limit is not None and shared <= limit
+        return LocalCheckResult(constraint_id, "pass" if ok else "fail", f"{shared} <= {limit}")
+    return None
+
+
 def evaluate_predicate_like(ir: dict[str, Any], predicate: dict[str, Any]) -> LocalCheckResult:
     pid = predicate.get("id") or predicate.get("constraint_id") or "predicate"
-    if predicate.get("op") == "all_not_null":
+    predicate_op = predicate.get("op")
+    if predicate_op == "all_not_null":
         missing = [field for field in predicate.get("fields", []) if get_path(ir, field) is None]
         return LocalCheckResult(pid, "pass" if not missing else "fail", f"missing={missing}")
-    if predicate.get("op") == "is_not_null":
-        field = predicate.get("field")
-        ok = get_path(ir, field) is not None
-        return LocalCheckResult(pid, "pass" if ok else "fail", f"{field} is not null")
-    lhs = eval_expr(ir, predicate.get("lhs") or predicate.get("expr") or predicate.get("field"))
+    if predicate_op in {"is_not_null", "not_null", "nonnull"}:
+        lhs_operand = predicate.get("lhs") or predicate.get("field")
+        lhs = resolve_local_predicate_operand(ir, lhs_operand)
+        return LocalCheckResult(pid, "pass" if lhs is not None else "fail", f"{render_local_operand(lhs_operand)} is not null")
+    if predicate_op in {"is_null", "null"}:
+        lhs_operand = predicate.get("lhs") or predicate.get("field")
+        lhs = resolve_local_predicate_operand(ir, lhs_operand)
+        return LocalCheckResult(pid, "pass" if lhs is None else "fail", f"{render_local_operand(lhs_operand)} is null")
+    lhs = resolve_local_predicate_operand(ir, predicate.get("lhs") or predicate.get("expr") or predicate.get("field"))
     rhs = predicate.get("const")
     if "rhs_value" in predicate:
         rhs = predicate["rhs_value"]
+    if "rhs" in predicate:
+        rhs = resolve_local_predicate_operand(ir, predicate["rhs"])
     if "rhs_expr" in predicate:
         rhs = eval_expr(ir, predicate["rhs_expr"])
     if "rhs_field" in predicate:
         rhs = get_path(ir, predicate["rhs_field"])
     op = predicate.get("op")
-    ok = {"eq": lhs == rhs, "le": lhs is not None and rhs is not None and lhs <= rhs}.get(op, True)
+    ok = compare_local_values(lhs, rhs, op)
     return LocalCheckResult(pid, "pass" if ok else "fail", f"{lhs} {op} {rhs}")
+
+
+def format_precondition_rejection(item: dict[str, Any]) -> str:
+    check_id = str(item.get("id") or "unknown_precondition")
+    status = str(item.get("status") or "unknown")
+    detail = item.get("detail") or {}
+    evaluated = detail.get("evaluated") or []
+    reason = next((entry.get("reason") for entry in evaluated if isinstance(entry, dict) and entry.get("reason")), None)
+    return f"{check_id}({status}{': ' + str(reason) if reason else ''})"
+
+
+def resolve_local_predicate_operand(ir: dict[str, Any], operand: Any) -> Any:
+    if isinstance(operand, dict):
+        if "const" in operand:
+            return operand["const"]
+        if "field" in operand:
+            return get_path(ir, operand["field"])
+        if "expr" in operand:
+            return eval_expr(ir, operand["expr"])
+        return None
+    return eval_expr(ir, operand)
+
+
+def render_local_operand(operand: Any) -> str:
+    if isinstance(operand, dict):
+        return str(operand.get("field") or operand.get("expr") or operand.get("const"))
+    return str(operand)
+
+
+def compare_local_values(lhs: Any, rhs: Any, op: str | None) -> bool:
+    if op in {"eq", "=", "=="}:
+        return lhs == rhs
+    if op in {"ne", "!=", "not_eq"}:
+        return lhs != rhs
+    if lhs is None or rhs is None:
+        return False
+    try:
+        if op in {"le", "<="}:
+            return lhs <= rhs
+        if op in {"lt", "<"}:
+            return lhs < rhs
+        if op in {"ge", ">="}:
+            return lhs >= rhs
+        if op in {"gt", ">"}:
+            return lhs > rhs
+    except TypeError:
+        lhs_text = str(lhs)
+        rhs_text = str(rhs)
+        if op in {"le", "<="}:
+            return lhs_text <= rhs_text
+        if op in {"lt", "<"}:
+            return lhs_text < rhs_text
+        if op in {"ge", ">="}:
+            return lhs_text >= rhs_text
+        if op in {"gt", ">"}:
+            return lhs_text > rhs_text
+    return True
 
 
 def eval_expr(ir: dict[str, Any], expr: Any) -> Any:
@@ -1313,6 +1552,13 @@ def eval_expr(ir: dict[str, Any], expr: Any) -> Any:
         if value is None:
             return None
         text = text.replace(field, str(value))
+    for name in sorted(FIELD_ALIASES, key=len, reverse=True):
+        if not re.search(rf"\b{name}\b", text):
+            continue
+        value = get_path(ir, name)
+        if value is None:
+            return None
+        text = re.sub(rf"\b{name}\b", str(value), text)
     try:
         return int(eval(text, {"__builtins__": {}}, {}))
     except Exception:
@@ -1327,6 +1573,10 @@ def eval_expr(ir: dict[str, Any], expr: Any) -> Any:
 def get_path(data: dict[str, Any], path: str | None) -> Any:
     if not path:
         return None
+    if path in FIELD_ALIASES:
+        aliased = get_path(data, FIELD_ALIASES[path])
+        if aliased is not None:
+            return aliased
     current: Any = data
     for part in path.split("."):
         if not isinstance(current, dict) or part not in current:

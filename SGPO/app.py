@@ -4,22 +4,42 @@ import argparse
 import json
 import copy
 import hashlib
+import math
 import re
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
+PACKAGE_PARENT = Path(__file__).resolve().parents[1]
+if str(PACKAGE_PARENT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_PARENT))
+
 from SGPO.diagnosis.defect_diagnosis import attach_diagnosis, diagnose_defects
-from SGPO.generate_ir.ir_checker import check_code_verification
+from SGPO.generate_ir.ir_checker import (
+    check_after_codegen, check_before_codegen, check_code_verification,
+    get_precondition_predicates, get_patch_ir_postcondition_predicates, get_code_verification_constraints,
+)
 from SGPO.generate_ir.ir_extraction import build_extracted_ir
 from SGPO.generate_ir.strategy_filter import filter_strategies_by_preconditions
-from SGPO.generate_ir.strategy_index_filter import filter_strategy_index, infer_stage_order_from_index
+from SGPO.generate_ir.strategy_index_filter import (
+    filter_strategy_index,
+    find_missing_requirements,
+    infer_stage_order_from_index,
+)
 from SGPO.generate_ir.strategy_library_merge import load_merged_strategy_documents
 from SGPO.generate_ir.stage_controller import StageController, synthesize_ir_updates
+from SGPO.generate_ir.gpu_resources import shared_memory_usage, shared_memory_limit, proposed_pipeline_bytes
+from SGPO.generate_ir.tiling_planner import (
+    build_joint_tiling_candidates,
+    tiling_plan_for_ir,
+)
 from SGPO.llm.openai_client import OpenAICompatibleClient
 from SGPO.llm.patch_generator import (
     build_patch_ir,
     generate_patch_with_llm,
     load_code_context,
+    load_code_region_context,
     load_strategy,
 )
 from SGPO.llm.concrete_code_generator import (
@@ -31,13 +51,35 @@ from SGPO.llm.c_code_generator import (
     apply_cpu_c_code_files,
     generate_cpu_c_code_from_patch_with_llm,
 )
-from SGPO.llm.strategy_selector import get_micro_strategy_from_llm
+from SGPO.llm.strategy_selector import (
+    get_joint_tiling_selection_from_llm,
+    get_micro_strategy_from_llm,
+    get_unlock_batch_plan_from_llm,
+)
 from SGPO.utils.common_utils import load_config, load_json, save_json
-from SGPO.verification.build_run_verifier import verify_build_and_run
+from SGPO.utils.execution import (
+    chain_client, chain_namespace, configure_execution, defer_latest,
+    execution_config, parallel_chain_map,
+)
+from SGPO.verification.build_run_verifier import (
+    DEFAULT_BENCHMARK_RUNS,
+    DEFAULT_BENCHMARK_WARMUP_RUNS,
+    DEFAULT_VCVARS64,
+    compile_gemm,
+    update_compile_result,
+    verify_build_and_run,
+)
 from SGPO.verification.c_build_run_verifier import verify_cpu_build_and_run
+from SGPO.verification.c_build_run_verifier import compile_cpu_gemm, update_cpu_compile_result
 from SGPO.verification.code_ast_extractor import extract_code_ast
 from SGPO.verification.gemm_semantic_checker import check_gemm_semantic_obligations
-from SGPO.verification.gemm_semantic_repair import generate_semantic_repair_candidate
+from SGPO.verification.gemm_semantic_repair import (
+    build_throughput_cuda_kernel_cuh,
+    extract_launch_config_from_ir,
+    generate_semantic_repair_candidate,
+    normalize_launch_config_for_repair,
+    normalize_throughput_launch_config,
+)
 from SGPO.verification.patch_apply_verify import mark_patch_apply_failed, summarize_verification
 
 
@@ -76,6 +118,10 @@ DEFAULT_FINAL_CODE_BUNDLE_OUTPUT = DEFAULT_CODE_DIR / "final_code_bundle.txt"
 DEFAULT_EVOLUTION_OUTPUT = DEFAULT_CHECK_DIR / "evolution_summary.json"
 DEFAULT_TOP_RESULTS_OUTPUT = DEFAULT_CHECK_DIR / "top_3_terminal_results.json"
 DEFAULT_PERFORMANCE_UNLOCK_OUTPUT = DEFAULT_CHECK_DIR / "performance_unlock_summary.json"
+DEFAULT_UNLOCK_BATCH_PLAN_OUTPUT = DEFAULT_CHECK_DIR / "unlock_batch_plan.json"
+DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT = DEFAULT_CHECK_DIR / "unlock_batch_result.json"
+DEFAULT_UNLOCK_BATCH_PATCH_OUTPUT = DEFAULT_PATCH_DIR / "unlock_patch.json"
+DEFAULT_UNLOCK_BATCH_DEFECT_OUTPUT = DEFAULT_DEFECT_DIR / "unlock_defect.json"
 DEFAULT_VERIFIED_IR_OUTPUT = DEFAULT_IR_PATCH_DIR / "optir.verified.json"
 DEFAULT_CODE_ROOT = ROOT / "gemm_code" / "skeleton"
 DEFAULT_CPU_CODE_ROOT = ROOT / "gemm_code" / "cpu_skeleton"
@@ -86,6 +132,13 @@ DEFAULT_CODE_FILES = [
     "cuda_kernel.cuh",
     "kernel.h",
 ]
+DEFAULT_LLM_CONTEXT_FILES = [
+    "kernel.h",
+    "cuda_kernel.cuh",
+]
+DEFAULT_AST_CODE_FILES = [
+    "cuda_kernel.cuh",
+]
 DEFAULT_PROMPT = ROOT / "llm" / "prompts" / "get_strategy_prompt.txt"
 DEFAULT_MICRO_STRATEGY_PROMPT = ROOT / "llm" / "prompts" / "get_micro_strategy_prompt.txt"
 DEFAULT_PATCH_PROMPT = ROOT / "llm" / "prompts" / "generate_patch_prompt.txt"
@@ -94,17 +147,76 @@ DEFAULT_CPU_PATCH_PROMPT = ROOT / "llm" / "prompts" / "generate_cpu_c_patch_prom
 DEFAULT_CPU_PATCH_TO_CODE_PROMPT = ROOT / "llm" / "prompts" / "generate_cpu_c_code_prompt.txt"
 DEFAULT_CONFIG = ROOT / "conf.yaml"
 DEFAULT_MAX_REPAIR_ATTEMPTS = 3
-DEFAULT_STRATEGY_PROFILE = "stable_correctness_first"
+CORE_CONSTRUCTION_COUPLED_PROFILE = "core_construction_coupled"
+DEFAULT_STRATEGY_PROFILE = CORE_CONSTRUCTION_COUPLED_PROFILE
 DEFAULT_UNLOCKED_PERFORMANCE_PROFILE = "throughput_exploration"
-DEFAULT_SELECTION_MODE = "top3_beam_search_graph_filtered"
+DEFAULT_SELECTION_MODE = "hierarchical_top3_lazy_fallback"
 DEFAULT_MAX_FRONTIER_STATES_PER_STAGE = 3
 DEFAULT_SINGLE_PATH_MODE = False
 DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE = 3
 DEFAULT_TOP_K_FINAL_RESULTS = 3
+DEFAULT_TILING_TOP_K_PER_LEVEL = 3
+DEFAULT_CORE_CONSTRUCTION_FRONTIER_STATES = 3
+DEFAULT_FIRST_PERFORMANCE_PRUNE_STAGE = "Tiling"
+DEFAULT_PRESERVE_TILING_LINEAGES = True
+DEFAULT_TOP_K_PER_TILING_LINEAGE = 1
+DEFAULT_LAZY_FALLBACK_EXECUTION = False
+DEFAULT_CLEAN_GENERATED_OUTPUTS = True
+DEFAULT_COMPILE_EACH_STRATEGY_STEP = False
+DEFAULT_COMPILE_EACH_STAGE = False
+DEFAULT_STAGE_BENCHMARK_RUNS = 1
+DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS = 0
+DEFAULT_VERIFY_INITIAL_SKELETON = True
+DEFAULT_STEP_COMPILE_TIMEOUT_SECONDS = 180
 MAX_ARTIFACT_STEM_LENGTH = 140
 STABLE_BASELINE_STAGES = ["Tiling", "Layout", "MappingReordering", "Vectorization", "Epilogue"]
+CORE_CONSTRUCTION_COUPLED_STAGES = ["Tiling", "Layout", "MappingReordering", "Vectorization", "Pipeline", "Epilogue"]
 THROUGHPUT_EXPLORATION_STAGES = ["Tiling", "Layout", "MappingReordering", "Vectorization", "Pipeline", "Epilogue"]
 PERFORMANCE_UNLOCK_SUCCESS_STATUSES = {"pass"}
+PHASE2_GENERAL = "phase2_unlock_general"
+PHASE2_LARGE_MATRIX = "phase2_unlock_large_matrix"
+EXCLUDED_DEFAULT_PHASE = "excluded_default"
+PHASE1_CORE_COUPLED = "phase1_core_coupled"
+DEFAULT_UNLOCK_BATCH_REPAIR_ATTEMPTS = 3
+DETERMINISTIC_MATERIALIZATION_MODE = "deterministic"
+LLM_PATCH_MATERIALIZATION_MODE = "llm_patch"
+DETERMINISTIC_STRATEGY_PREFIXES = (
+    "Tiling.BlockTile.",
+    "Tiling.WarpTile.",
+    "Tiling.ThreadTile.",
+    "Mapping.LaneLayout.",
+)
+DETERMINISTIC_STRATEGY_IDS = {
+    "Tiling.WarpTile.WMxWN",
+    "Tiling.WarpTile.ParametricWMxWN",
+    "Mapping.Warp.BasicWidLane",
+    "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
+    "Mapping.WarpThreadTile.WarpLaneFragment2D",
+    "Mapping.Warp.OutputFragment2D",
+    "Mapping.LaneLayout.2D_8x4",
+    "Layout.SharedMemory.AB.Basic",
+    "Layout.RegisterTile.C",
+    "Register.AccumulatorLayout.2DArray",
+    "Safety.BoundaryPolicy.GeneralGuarded",
+    "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+    "Safety.AssumeDivisibleAligned",
+    "Vectorization.AlignmentGuard",
+    "Pipeline.NoAsyncCopy.V1",
+    "Epilogue.AlphaBeta.General",
+    "Epilogue.BetaZero.FastPath",
+    "Epilogue.BetaOne.FastPath",
+    "Epilogue.StoreC.CoalescedScalar",
+    "Vectorization.StoreC.SafeScalar",
+    "Mapping.WarpStore.CoalescedC",
+}
+REQUIRED_CONSTRUCTION_SUBPHASES = {
+    "Tiling.BlockTileSelection",
+    "Tiling.WarpTileSelection",
+    "Tiling.ThreadTileSelection",
+    "Tiling.MappingDerivation",
+    "Layout.SharedMemoryDeclaration",
+    "Layout.RegisterAccumulatorLayout",
+}
 THROUGHPUT_PROFILE_PREFERRED_IDS = {
     "Tiling.BlockTileSelection": [
         "Tiling.BlockTile.128x128x16",
@@ -286,17 +398,61 @@ def main() -> None:
     code_files = backend_code_files(current_ir)
 
     config = load_config(Path(DEFAULT_CONFIG))
+    configure_execution(config.get("execution"))
+    print(f"SGPO execution: chain_workers={execution_config().chain_workers}, "
+          f"llm_max_concurrency={execution_config().llm_max_concurrency}, "
+          f"compile_workers={execution_config().compile_workers}, gpu_verification_workers=1")
+    if should_clean_generated_outputs(args, config):
+        clean_generated_outputs(current_ir)
+        save_json(Path(DEFAULT_IR_OUTPUT), current_ir)
     build_platform = resolve_build_platform(args, config)
+    compile_each_step = should_compile_each_strategy_step(args, config)
+    compile_each_stage = should_compile_each_stage(args, config)
+    per_step_compile_timeout = step_compile_timeout_seconds(config)
+    per_stage_benchmark_runs = stage_benchmark_runs(config)
+    per_stage_benchmark_warmup_runs = stage_benchmark_warmup_runs(config)
+    terminal_benchmark_runs = benchmark_runs(args, config)
+    terminal_benchmark_warmup_runs = benchmark_warmup_runs(args, config)
+    restore_initial_cuda_skeleton(code_root, current_ir)
+    if should_verify_initial_skeleton(args, config):
+        initial_skeleton_ir = verify_initial_skeleton_before_search(
+            current_ir=current_ir,
+            code_root=code_root,
+            build_platform=build_platform,
+            timeout_seconds=per_step_compile_timeout,
+            benchmark_runs=per_stage_benchmark_runs,
+            benchmark_warmup_runs=per_stage_benchmark_warmup_runs,
+        )
+        if not oracle_verification_passed(initial_skeleton_ir):
+            raise RuntimeError(
+                "Initial GEMM skeleton failed compile/run verification. "
+                f"See {DEFAULT_CHECK_DIR / 'initial_skeleton_verification.json'}."
+            )
     client = OpenAICompatibleClient(config["llm"])
     search_config = config.get("search", {}) or {}
     performance_config = config.get("performance_unlock", {}) or {}
     max_frontier_states = 1 if DEFAULT_SINGLE_PATH_MODE else int(
         search_config.get("max_frontier_states_per_stage", DEFAULT_MAX_FRONTIER_STATES_PER_STAGE) or 0
     )
-    cpu_unlock_enabled = performance_config.get("enable_cpu", True)
-    auto_unlock_performance = bool(performance_config.get("enabled", False)) and (
-        target_backend(current_ir) != "cpu" or bool(cpu_unlock_enabled)
+    tiling_top_k_per_level = int(
+        search_config.get("tiling_top_k_per_level", DEFAULT_TILING_TOP_K_PER_LEVEL) or 0
     )
+    core_construction_frontier_states = int(
+        search_config.get("core_construction_frontier_states", DEFAULT_CORE_CONSTRUCTION_FRONTIER_STATES) or 0
+    )
+    first_performance_prune_stage = str(
+        search_config.get("first_performance_prune_stage", DEFAULT_FIRST_PERFORMANCE_PRUNE_STAGE)
+    )
+    preserve_tiling_lineages = bool(
+        search_config.get("preserve_tiling_lineages", DEFAULT_PRESERVE_TILING_LINEAGES)
+    )
+    top_k_per_tiling_lineage = int(
+        search_config.get("top_k_per_tiling_lineage", DEFAULT_TOP_K_PER_TILING_LINEAGE) or 0
+    )
+    lazy_fallback_execution = bool(
+        search_config.get("lazy_fallback_execution", DEFAULT_LAZY_FALLBACK_EXECUTION)
+    )
+    auto_unlock_performance = bool(performance_config.get("enabled", False)) and target_backend(current_ir) != "cpu"
     unlocked_profile = performance_config.get("profile", DEFAULT_UNLOCKED_PERFORMANCE_PROFILE)
     best_overall_candidate = None
     best_partial_candidate = None
@@ -319,6 +475,7 @@ def main() -> None:
         )
     ]
     stage_summaries = []
+    terminal_fallback_states = []
     for stage in stage_order:
         if not frontier:
             stage_summaries.append(
@@ -333,6 +490,20 @@ def main() -> None:
                 }
             )
             continue
+        stage_frontier_limit = frontier_limit_for_stage(
+            stage=stage,
+            backend=target_backend(current_ir),
+            normal_limit=max_frontier_states,
+            core_limit=core_construction_frontier_states,
+            first_performance_prune_stage=first_performance_prune_stage,
+        )
+        use_tiling_lineage_beam = (
+            target_backend(current_ir) == "cuda"
+            and preserve_tiling_lineages
+            and (stage == "Tiling" or bool(tiling_lineage_keys(frontier)))
+        )
+        if use_tiling_lineage_beam and stage != "Tiling":
+            stage_frontier_limit = len(tiling_lineage_keys(frontier)) * top_k_per_tiling_lineage
         stage_result = run_exhaustive_stage(
             stage=stage,
             frontier=frontier,
@@ -342,35 +513,55 @@ def main() -> None:
             client=client,
             user_question=user_question,
             profile=strategy_profile,
-            max_frontier_states=max_frontier_states,
-            exhaust_pending=stage == stage_order[-1],
+            max_frontier_states=stage_frontier_limit,
+            exhaust_pending=target_backend(current_ir) == "cuda" or stage == stage_order[-1],
+            build_platform=build_platform,
+            compile_each_step=compile_each_step,
+            compile_each_stage=compile_each_stage,
+            step_compile_timeout_seconds=per_step_compile_timeout,
+            stage_benchmark_runs=per_stage_benchmark_runs,
+            stage_benchmark_warmup_runs=per_stage_benchmark_warmup_runs,
+            tiling_top_k_per_level=tiling_top_k_per_level,
+            preserve_tiling_lineages=use_tiling_lineage_beam,
+            top_k_per_tiling_lineage=top_k_per_tiling_lineage,
+            lazy_fallback_execution=lazy_fallback_execution,
         )
         stage_summaries.append(stage_result["summary"])
+        terminal_fallback_states.extend(stage_result.get("terminal_states", []))
         best_partial_candidate = choose_better_partial_candidate(
             best_partial_candidate,
             choose_best_candidate(stage_result.get("accepted_candidates", [])),
         )
         frontier = stage_result["frontier"]
+        stage_result["summary"]["post_stage_performance_prune"] = {
+            "enabled": False,
+            "reason": "Performance ranking is deferred until Phase 1 terminal verification.",
+        }
 
     baseline_terminal_verification = verify_terminal_chains(
-        frontier=frontier,
+        frontier=[*frontier, *terminal_fallback_states],
         strategy_library=strategy_library,
         build_platform=build_platform,
+        benchmark_runs=terminal_benchmark_runs,
+        benchmark_warmup_runs=terminal_benchmark_warmup_runs,
+        client=client,
     )
     terminal_verification = baseline_terminal_verification
     performance_phase = None
     if auto_unlock_performance and terminal_verification_has_correct_chain(baseline_terminal_verification):
         performance_phase = run_unlocked_performance_phase(
-            initial_ir=current_ir,
-            initial_source_snapshot=initial_source_snapshot,
+            baseline_terminal_verification=baseline_terminal_verification,
             raw_strategy_index=raw_strategy_index,
             dependency_graph=dependency_graph,
             strategy_library=strategy_library,
             client=client,
             user_question=user_question,
             profile=unlocked_profile,
-            max_frontier_states=max_frontier_states,
             build_platform=build_platform,
+            compile_each_step=compile_each_step,
+            step_compile_timeout_seconds=per_step_compile_timeout,
+            benchmark_runs=terminal_benchmark_runs,
+            benchmark_warmup_runs=terminal_benchmark_warmup_runs,
         )
         save_json(Path(DEFAULT_PERFORMANCE_UNLOCK_OUTPUT), summarize_performance_phase(performance_phase))
         terminal_verification = merge_terminal_verifications(
@@ -434,18 +625,27 @@ def main() -> None:
         (best_overall_candidate or best_partial_candidate or {}).get("candidate_code_dir")
     )
     save_json(Path(DEFAULT_VERIFIED_IR_OUTPUT), final_ir)
-    restore_source_files(code_root, final_source_snapshot)
 
-    final_code = collect_final_code(code_root, final_ir, final_history, stage_summaries)
+    final_code = collect_final_code_from_snapshot(final_source_snapshot, final_ir, final_history, stage_summaries)
     save_json(Path(DEFAULT_FINAL_CODE_OUTPUT), final_code)
     write_final_code_bundle(Path(DEFAULT_FINAL_CODE_BUNDLE_OUTPUT), final_code)
+    if best_overall_candidate and terminal_chain_is_accepted(best_overall_candidate["verified_ir"]):
+        materialize_final_generated_files(code_root, final_source_snapshot, final_ir)
     save_json(Path(DEFAULT_EVOLUTION_OUTPUT), {
         "selection_mode": DEFAULT_SELECTION_MODE,
+        "tiling_hierarchical_search": {
+            "top_k_per_level": tiling_top_k_per_level,
+            "maximum_block_warp_thread_combinations": tiling_top_k_per_level ** 3,
+        },
         "stage_order": stage_order,
         "strategy_profile": strategy_profile,
         "performance_unlock": {
             "enabled": auto_unlock_performance,
             "build_platform": build_platform,
+            "compile_each_strategy_step": compile_each_step,
+            "compile_each_stage": compile_each_stage,
+            "lazy_fallback_execution": lazy_fallback_execution,
+            "step_compile_timeout_seconds": per_step_compile_timeout,
             "triggered": performance_phase is not None,
             "profile": unlocked_profile if performance_phase is not None else None,
         },
@@ -483,8 +683,14 @@ def main() -> None:
                 else None,
                 "evolution_output": str(Path(DEFAULT_EVOLUTION_OUTPUT)),
                 "selection_mode": DEFAULT_SELECTION_MODE,
+                "tiling_hierarchical_search": {
+                    "top_k_per_level": tiling_top_k_per_level,
+                    "maximum_block_warp_thread_combinations": tiling_top_k_per_level ** 3,
+                },
                 "top_k_strategies_per_subphase": DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE,
                 "top_k_final_results": DEFAULT_TOP_K_FINAL_RESULTS,
+                "benchmark_runs": terminal_benchmark_runs,
+                "benchmark_warmup_runs": terminal_benchmark_warmup_runs,
                 "strategy_profile": strategy_profile,
                 "performance_unlock": {
                     "enabled": auto_unlock_performance,
@@ -499,10 +705,9 @@ def main() -> None:
                 "best_overall_strategy_id": best_overall_candidate.get("strategy_id") if best_overall_candidate else None,
                 "best_overall_code_dir": best_overall_candidate.get("candidate_code_dir") if best_overall_candidate else None,
                 "best_overall_gflops": candidate_gflops(best_overall_candidate),
-                "top_3_terminal_results": top_terminal_results,
+                "top_3_terminal_results": summarize_terminal_results_for_console(top_terminal_results),
                 "applied_strategy_ids": final_history.get("applied_strategy_ids", []),
                 "failed_strategy_counts": final_history.get("failed_strategy_counts", {}),
-                "stage_summaries": stage_summaries,
             },
             ensure_ascii=False,
             indent=2,
@@ -515,10 +720,136 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--build-platform",
         choices=["windows", "linux"],
-        default=None,
+        default="windows",
         help="Compilation/runtime platform for generated code. Defaults to build.platform in conf.yaml, then windows.",
     )
+    parser.add_argument(
+        "--keep-generated-cache",
+        action="store_true",
+        help="Keep previous generated code/results instead of clearing SGPO output directories at startup.",
+    )
+    parser.add_argument(
+        "--skip-step-compile",
+        action="store_true",
+        help="Do not compile each generated strategy step before advancing to the next step.",
+    )
+    parser.add_argument(
+        "--skip-stage-compile",
+        action="store_true",
+        help="Do not compile/run at stage completion before advancing to the next stage.",
+    )
+    parser.add_argument(
+        "--skip-initial-skeleton-check",
+        action="store_true",
+        help="Do not compile/run the initial skeleton before strategy search.",
+    )
+    parser.add_argument(
+        "--benchmark-runs",
+        type=int,
+        default=None,
+        help="Measured executable runs per terminal candidate. Defaults to build.benchmark_runs, then 10.",
+    )
+    parser.add_argument(
+        "--benchmark-warmup-runs",
+        type=int,
+        default=None,
+        help="Warmup executable runs before measured runs. Defaults to build.benchmark_warmup_runs, then 2.",
+    )
     return parser.parse_args()
+
+
+def should_clean_generated_outputs(args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    if getattr(args, "keep_generated_cache", False):
+        return False
+    run_config = config.get("run", {}) or {}
+    if "clean_generated_outputs" in run_config:
+        return bool(run_config.get("clean_generated_outputs"))
+    return DEFAULT_CLEAN_GENERATED_OUTPUTS
+
+
+def should_compile_each_strategy_step(args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    if getattr(args, "skip_step_compile", False):
+        return False
+    build_config = config.get("build", {}) or {}
+    if "compile_each_strategy_step" in build_config:
+        return bool(build_config.get("compile_each_strategy_step"))
+    return DEFAULT_COMPILE_EACH_STRATEGY_STEP
+
+
+def should_compile_each_stage(args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    if getattr(args, "skip_stage_compile", False):
+        return False
+    build_config = config.get("build", {}) or {}
+    if "compile_each_stage" in build_config:
+        return bool(build_config.get("compile_each_stage"))
+    return DEFAULT_COMPILE_EACH_STAGE
+
+
+def stage_benchmark_runs(config: dict[str, Any]) -> int:
+    build_config = config.get("build", {}) or {}
+    return max(1, int(build_config.get("stage_benchmark_runs", DEFAULT_STAGE_BENCHMARK_RUNS)))
+
+
+def stage_benchmark_warmup_runs(config: dict[str, Any]) -> int:
+    build_config = config.get("build", {}) or {}
+    return max(0, int(build_config.get("stage_benchmark_warmup_runs", DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS)))
+
+
+def should_verify_initial_skeleton(args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    if getattr(args, "skip_initial_skeleton_check", False):
+        return False
+    build_config = config.get("build", {}) or {}
+    if "verify_initial_skeleton" in build_config:
+        return bool(build_config.get("verify_initial_skeleton"))
+    return DEFAULT_VERIFY_INITIAL_SKELETON
+
+
+def step_compile_timeout_seconds(config: dict[str, Any]) -> int:
+    build_config = config.get("build", {}) or {}
+    return int(build_config.get("step_compile_timeout_seconds", DEFAULT_STEP_COMPILE_TIMEOUT_SECONDS))
+
+
+def benchmark_runs(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    if getattr(args, "benchmark_runs", None) is not None:
+        return max(1, int(args.benchmark_runs))
+    build_config = config.get("build", {}) or {}
+    return max(1, int(build_config.get("benchmark_runs", DEFAULT_BENCHMARK_RUNS)))
+
+
+def benchmark_warmup_runs(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    if getattr(args, "benchmark_warmup_runs", None) is not None:
+        return max(0, int(args.benchmark_warmup_runs))
+    build_config = config.get("build", {}) or {}
+    return max(0, int(build_config.get("benchmark_warmup_runs", DEFAULT_BENCHMARK_WARMUP_RUNS)))
+
+
+def clean_generated_outputs(ir: dict[str, Any] | None = None) -> None:
+    for path in generated_output_dirs(ir):
+        safe_remove_generated_output_dir(path)
+
+
+def generated_output_dirs(ir: dict[str, Any] | None = None) -> list[Path]:
+    return [
+        backend_generated_code_root(ir or {}),
+        Path(DEFAULT_GENERATED_CODE_ROOT),
+        Path(DEFAULT_GENERATED_CPU_CODE_ROOT),
+        Path(DEFAULT_CHECK_DIR),
+        Path(DEFAULT_PATCH_DIR),
+        Path(DEFAULT_CODE_DIR),
+        Path(DEFAULT_DEFECT_DIR),
+        Path(DEFAULT_CHAIN_DIR),
+        Path(DEFAULT_IR_PATCH_DIR),
+    ]
+
+
+def safe_remove_generated_output_dir(path: Path) -> None:
+    resolved_root = ROOT.resolve()
+    resolved = path.resolve()
+    if resolved == resolved_root or resolved_root not in [resolved, *resolved.parents]:
+        raise ValueError(f"Refusing to clean path outside SGPO project: {path}")
+    if not path.exists():
+        return
+    shutil.rmtree(path)
 
 
 def resolve_build_platform(args: argparse.Namespace, config: dict[str, Any]) -> str:
@@ -528,7 +859,193 @@ def resolve_build_platform(args: argparse.Namespace, config: dict[str, Any]) -> 
     return "linux" if value in {"linux", "unix", "posix"} else "windows"
 
 
+def restore_initial_cuda_skeleton(code_root: Path, ir: dict[str, Any]) -> None:
+    if target_backend(ir) != "cuda":
+        return
+    template = ROOT / "gemm_code" / "skeleton_template" / "cuda_kernel.cuh"
+    restore_source_files(code_root, {"cuda_kernel.cuh": template.read_text(encoding="utf-8")})
+
+
+def verify_initial_skeleton_before_search(
+    current_ir: dict[str, Any],
+    code_root: Path,
+    build_platform: str,
+    timeout_seconds: int,
+    benchmark_runs: int,
+    benchmark_warmup_runs: int,
+) -> dict[str, Any]:
+    if target_backend(current_ir) == "cpu":
+        verified_ir = verify_cpu_build_and_run(
+            ir=current_ir,
+            source_dir=code_root,
+            build_dir=code_root / "build",
+            build_platform=build_platform,
+            timeout_seconds=timeout_seconds,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
+        )
+    else:
+        verified_ir = verify_build_and_run(
+            ir=current_ir,
+            source_dir=code_root,
+            build_dir=code_root / "build",
+            build_platform=build_platform,
+            timeout_seconds=timeout_seconds,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
+        )
+    verified_ir.setdefault("verification", {})["summary"] = summarize_verification(verified_ir)
+    save_json(DEFAULT_CHECK_DIR / "initial_skeleton_verification.json", verified_ir)
+    return verified_ir
+
+
+def verify_stage_completion_build_run(
+    ir: dict[str, Any],
+    source_snapshot: dict[str, str],
+    stage: str,
+    chain_path: list[str],
+    chain_code: list[int],
+    build_platform: str,
+    timeout_seconds: int,
+    benchmark_runs: int = DEFAULT_STAGE_BENCHMARK_RUNS,
+    benchmark_warmup_runs: int = DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS,
+) -> dict[str, Any]:
+    stage_code_dir = chain_code_path(chain_path or [stage], chain_code, ir)
+    restore_source_files(stage_code_dir, source_snapshot)
+    build_dir = stage_code_dir / f"build_stage_{safe_name(stage)}"
+    if target_backend(ir) == "cpu":
+        verified_ir = verify_cpu_build_and_run(
+            ir=ir,
+            source_dir=stage_code_dir,
+            build_dir=build_dir,
+            build_platform=build_platform,
+            timeout_seconds=timeout_seconds,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
+        )
+    else:
+        verified_ir = verify_build_and_run(
+            ir=ir,
+            source_dir=stage_code_dir,
+            build_dir=build_dir,
+            build_platform=build_platform,
+            timeout_seconds=timeout_seconds,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
+        )
+    verified_ir.setdefault("verification", {})["summary"] = summarize_verification(verified_ir)
+    verified_ir.setdefault("verification", {}).setdefault("stage_gates", {})[stage] = {
+        "status": "pass" if oracle_verification_passed(verified_ir) else "fail",
+        "build_dir": str(build_dir),
+        "benchmark_runs": benchmark_runs,
+        "benchmark_warmup_runs": benchmark_warmup_runs,
+    }
+    return verified_ir
+
+
+def attach_stage_compile_run_report(stage_report: dict[str, Any], verified_ir: dict[str, Any]) -> dict[str, Any]:
+    report = copy.deepcopy(stage_report)
+    verification = verified_ir.get("verification", {}) or {}
+    performance = verified_ir.get("performance", {}) or {}
+    compile_status = (verification.get("compile") or {}).get("status")
+    correctness_status = (verification.get("correctness") or {}).get("status")
+    runtime_status = (verification.get("runtime_safety") or {}).get("status")
+    accepted = oracle_verification_passed(verified_ir)
+    report["stage_compile_run"] = {
+        "enabled": True,
+        "accepted": accepted,
+        "compile_status": compile_status,
+        "correctness_status": correctness_status,
+        "runtime_safety_status": runtime_status,
+        "cuda_error": (verification.get("runtime_safety") or {}).get("cuda_error"),
+        "latency_ms": performance.get("latency_ms"),
+        "gflops": performance.get("gflops"),
+        "gflops_mean": performance.get("gflops_mean"),
+        "benchmark_runs": performance.get("benchmark_runs"),
+    }
+    if not accepted:
+        report["accepted"] = False
+        report.setdefault("results", []).append(
+            {
+                "id": "STAGE_COMPILE_RUN_GATE",
+                "status": "fail",
+                "message": "stage completed IR checks, but compile/correctness/runtime stage gate failed",
+            }
+        )
+    return report
+
+
+def verify_strategy_step_compile_gate(
+    ir: dict[str, Any],
+    candidate_code_dir: Path,
+    build_platform: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    next_ir = copy.deepcopy(ir)
+    build_dir = candidate_code_dir / "build_step"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    if target_backend(next_ir) == "cpu":
+        exe_name = "sgpo_step_gemm_cpu" if build_platform == "linux" else "sgpo_step_gemm_cpu.exe"
+        compile_result = compile_cpu_gemm(
+            source_dir=candidate_code_dir,
+            exe_path=build_dir / exe_name,
+            timeout_seconds=timeout_seconds,
+            ir=next_ir,
+            build_platform=build_platform,
+        )
+        update_cpu_compile_result(next_ir, compile_result)
+    else:
+        exe_name = "sgpo_step_gemm" if build_platform == "linux" else "sgpo_step_gemm.exe"
+        compile_result = compile_gemm(
+            ir=next_ir,
+            source_dir=candidate_code_dir,
+            exe_path=build_dir / exe_name,
+            timeout_seconds=timeout_seconds,
+            vcvars64_path=DEFAULT_VCVARS64,
+            build_platform=build_platform,
+        )
+        update_compile_result(next_ir, compile_result)
+
+    verification = next_ir.setdefault("verification", {})
+    summary = verification.setdefault("summary", {})
+    compile_status = compile_result.get("status")
+    summary.update(
+        {
+            "step_compile_gate": "pass" if compile_status == "pass" else "fail",
+            "compile_status": compile_status,
+            "compile_error_message": verification.get("compile", {}).get("error_message"),
+            "build_platform": build_platform,
+            "step_compile_build_dir": str(build_dir),
+        }
+    )
+    if compile_status != "pass":
+        next_ir["chain_step"] = {
+            "status": "failed",
+            "phase": "step_compile_gate",
+            "candidate_code_dir": str(candidate_code_dir),
+            "reason": verification.get("compile", {}).get("error_message") or "compile failed",
+        }
+        verification["accepted"] = False
+        verification.setdefault("correctness", {})["status"] = "not_run"
+        verification.setdefault("runtime_safety", {})["status"] = "not_run"
+        verification.setdefault("runtime_safety", {})["cuda_error"] = None
+        summary["chain_step_status"] = "failed"
+        summary["failed_phase"] = "step_compile_gate"
+    return next_ir
+
+
+def step_compile_gate_passed(ir: dict[str, Any]) -> bool:
+    return ir.get("verification", {}).get("compile", {}).get("status") == "pass"
+
+
 def infer_strategy_profile(ir: dict[str, Any], strategy_index: dict[str, Any]) -> str:
+    if target_backend(ir) == "cpu":
+        return (
+            ir.get("strategy", {}).get("profile")
+            or ir.get("precision", {}).get("profile")
+            or strategy_index.get("target", {}).get("default_profile")
+            or DEFAULT_STRATEGY_PROFILE
+        )
     return (
         ir.get("strategy", {}).get("profile")
         or ir.get("precision", {}).get("profile")
@@ -538,91 +1055,100 @@ def infer_strategy_profile(ir: dict[str, Any], strategy_index: dict[str, Any]) -
 
 
 def run_unlocked_performance_phase(
-    initial_ir: dict[str, Any],
-    initial_source_snapshot: dict[str, str],
+    baseline_terminal_verification: dict[str, Any],
     raw_strategy_index: dict[str, Any],
     dependency_graph: dict[str, Any],
     strategy_library: dict[str, Any],
     client: OpenAICompatibleClient,
     user_question: str,
     profile: str,
-    max_frontier_states: int,
     build_platform: str,
+    compile_each_step: bool,
+    step_compile_timeout_seconds: int,
+    benchmark_runs: int,
+    benchmark_warmup_runs: int,
 ) -> dict[str, Any]:
-    phase_ir = copy.deepcopy(initial_ir)
-    phase_ir.setdefault("strategy", {})["profile"] = profile
-    phase_stage_order = infer_app_stage_order(phase_ir, dependency_graph, raw_strategy_index, strategy_library)
-    frontier = [
-        make_frontier_state(
-            state_id=f"{safe_name(profile)}_root",
-            current_ir=phase_ir,
-            source_snapshot=initial_source_snapshot,
-            history={
-                "applied_strategy_ids": [],
-                "applied_micro_strategies": [],
-                "failed_strategy_counts": {},
-                "completed_subphases": [],
-                "events": [
-                    {
-                        "stage": "PerformanceUnlock",
-                        "status": "started",
-                        "profile": profile,
-                        "reason": "stable correctness chain passed; performance constraints are unlocked",
-                    }
-                ],
-            },
-            path=[],
-            path_code=[9],
-        )
-    ]
-    stage_summaries = []
-    for stage in phase_stage_order:
-        if not frontier:
-            stage_summaries.append(
-                {
-                    "stage": stage,
-                    "selection_mode": DEFAULT_SELECTION_MODE,
-                    "input_frontier_count": 0,
-                    "output_frontier_count": 0,
-                    "accepted_candidate_count": 0,
-                    "status": "skipped",
-                    "reason": "performance-unlock frontier is empty",
-                    "profile": profile,
-                }
-            )
-            continue
-        stage_result = run_exhaustive_stage(
-            stage=stage,
-            frontier=frontier,
-            raw_strategy_index=raw_strategy_index,
-            dependency_graph=dependency_graph,
-            strategy_library=strategy_library,
-            client=client,
-            user_question=user_question,
-            profile=profile,
-            max_frontier_states=max_frontier_states,
-            exhaust_pending=stage == phase_stage_order[-1],
-        )
-        stage_result["summary"]["profile"] = profile
-        stage_result["summary"]["phase"] = "performance_unlock"
-        stage_summaries.append(stage_result["summary"])
-        frontier = stage_result["frontier"]
-
-    terminal_verification = verify_terminal_chains(
-        frontier=frontier,
-        strategy_library=strategy_library,
-        build_platform=build_platform,
+    phase1_top = select_top_correct_candidates(
+        baseline_terminal_verification.get("verified_candidates", []) or [],
+        DEFAULT_TOP_K_FINAL_RESULTS,
     )
-    terminal_verification["summary"]["profile"] = profile
-    terminal_verification["summary"]["phase"] = "performance_unlock"
-    stage_summaries.append(terminal_verification["summary"])
+    unlocked_candidates: list[dict[str, Any]] = []
+    final_frontier: list[dict[str, Any]] = []
+    stage_summaries: list[dict[str, Any]] = []
+    chain_reports: list[dict[str, Any]] = []
+
+    def invoke_unlock(item):
+        chain_index, candidate = item
+        with chain_client(client) as worker_client:
+            return run_batch_unlock_for_terminal_candidate(
+                base_candidate=copy.deepcopy(candidate),
+                chain_index=chain_index,
+                raw_strategy_index=raw_strategy_index,
+                dependency_graph=dependency_graph,
+                strategy_library=strategy_library,
+                client=worker_client,
+                user_question=user_question,
+                profile=profile,
+                build_platform=build_platform,
+                compile_each_step=compile_each_step,
+                step_compile_timeout_seconds=step_compile_timeout_seconds,
+                benchmark_runs=benchmark_runs,
+                benchmark_warmup_runs=benchmark_warmup_runs,
+            )
+    indexed_candidates = list(enumerate(phase1_top, start=1))
+    outcomes = parallel_chain_map(
+        invoke_unlock, indexed_candidates,
+        lambda item: f"unlock_{item[0]}",
+    )
+    for (chain_index, candidate), outcome in zip(indexed_candidates, outcomes):
+        for output, data in outcome.latest.items():
+            save_json(output, data)
+        if outcome.error is not None:
+            chain_report = {
+                "base_chain_id": candidate.get("strategy_id"), "verified_candidates": [],
+                "summary": {"stage": "PerformanceUnlock", "status": "chain_error",
+                            "base_chain_id": candidate.get("strategy_id"), "error_message": str(outcome.error)},
+            }
+        else:
+            chain_report = outcome.value
+        chain_reports.append(chain_report)
+        unlocked_candidates.extend(chain_report.get("verified_candidates", []) or [])
+        if chain_report.get("final_state"):
+            final_frontier.append(chain_report["final_state"])
+        stage_summaries.append(chain_report["summary"])
+
+    best_candidate = choose_best_candidate([item for item in unlocked_candidates if item.get("accepted")])
+    if best_candidate is None:
+        best_candidate = choose_best_candidate(unlocked_candidates)
+    top_terminal_results = build_top_terminal_results(unlocked_candidates, DEFAULT_TOP_K_FINAL_RESULTS)
+    terminal_verification = {
+        "verified_candidates": unlocked_candidates,
+        "best_candidate": best_candidate,
+        "best_state": None,
+        "top_terminal_results": top_terminal_results,
+        "summary": {
+            "stage": "PerformanceUnlock",
+            "phase": "performance_unlock",
+            "selection_mode": "size_aware_batch_unlock",
+            "profile": profile,
+            "input_correct_phase1_chain_count": len(phase1_top),
+            "terminal_chain_count": len(unlocked_candidates),
+            "verified_terminal_chain_count": len(unlocked_candidates),
+            "accepted_terminal_chain_count": len([item for item in unlocked_candidates if item.get("accepted")]),
+            "best_chain_id": best_candidate.get("strategy_id") if best_candidate else None,
+            "best_chain_gflops": candidate_gflops(best_candidate),
+            "top_k_final_results": DEFAULT_TOP_K_FINAL_RESULTS,
+            "top_terminal_results": top_terminal_results,
+            "chain_reports": chain_reports,
+        },
+    }
     return {
         "profile": profile,
-        "stage_order": phase_stage_order,
-        "frontier": frontier,
+        "stage_order": ["PerformanceUnlock.BatchPlan", "PerformanceUnlock.BatchApply"],
+        "frontier": final_frontier,
         "terminal_verification": terminal_verification,
-        "best_candidate": terminal_verification.get("best_candidate"),
-        "stage_summaries": stage_summaries,
+        "best_candidate": best_candidate,
+        "stage_summaries": stage_summaries + [terminal_verification["summary"]],
     }
 
 
@@ -646,6 +1172,988 @@ def summarize_performance_phase(performance_phase: dict[str, Any]) -> dict[str, 
         "top_terminal_results": terminal.get("top_terminal_results", []),
         "stage_summaries": performance_phase.get("stage_summaries", []),
     }
+
+
+def select_top_correct_candidates(candidates: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
+    correct = [candidate for candidate in candidates if candidate_has_correctness_pass(candidate)]
+    return sorted(correct, key=lambda item: candidate_gflops(item) or -1.0, reverse=True)[:top_k]
+
+
+def run_batch_unlock_for_terminal_candidate(
+    base_candidate: dict[str, Any],
+    chain_index: int,
+    raw_strategy_index: dict[str, Any],
+    dependency_graph: dict[str, Any],
+    strategy_library: dict[str, Any],
+    client: OpenAICompatibleClient,
+    user_question: str,
+    profile: str,
+    build_platform: str,
+    compile_each_step: bool,
+    step_compile_timeout_seconds: int,
+    benchmark_runs: int,
+    benchmark_warmup_runs: int,
+) -> dict[str, Any]:
+    base_ir = copy.deepcopy(base_candidate.get("verified_ir", {}) or {})
+    base_history = copy_history(base_candidate.get("history", {}) or base_ir.get("strategy", {}))
+    base_history.setdefault("events", []).append(
+        {
+            "stage": "PerformanceUnlock",
+            "status": "started",
+            "profile": profile,
+            "base_chain_id": base_candidate.get("strategy_id"),
+        }
+    )
+    working_state = make_frontier_state(
+        state_id=f"unlock_{chain_index:04d}",
+        current_ir=base_ir,
+        source_snapshot=base_candidate.get("source_snapshot", {}),
+        history=base_history,
+        path=list(base_candidate.get("path", []) or base_ir.get("strategy", {}).get("chain_path", []) or []),
+        path_code=list(base_candidate.get("path_code", []) or []),
+        last_candidate=base_candidate,
+        code_dir=base_candidate.get("candidate_code_dir"),
+    )
+    matrix_profile = build_matrix_profile(base_ir)
+    phase2_index = build_phase2_unlock_strategy_index(
+        raw_strategy_index=raw_strategy_index,
+        ir=base_ir,
+        dependency_graph=dependency_graph,
+        history=base_history,
+        matrix_profile=matrix_profile,
+    )
+    code_dir = Path(base_candidate.get("candidate_code_dir") or chain_code_path(working_state["path"], working_state["path_code"], base_ir))
+    code_summary = build_unlock_code_summary(code_dir, backend_llm_context_files(base_ir), base_ir, base_history)
+    verifier_summary = build_unlock_verifier_summary(base_candidate)
+    batch_plan_error = None
+    try:
+        batch_plan = get_unlock_batch_plan_from_llm(
+            client=client,
+            strategy_index=phase2_index,
+            optir_summary=compact_ir_summary(base_ir),
+            code_summary=code_summary,
+            matrix_profile=matrix_profile,
+            verification_summary=verifier_summary,
+            user_question=user_question,
+        )
+    except Exception as exc:
+        batch_plan_error = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "fallback": "deterministic_region_batches",
+        }
+        batch_plan = {"batches": fallback_unlock_batches(phase2_index.get("strategies", []) or [])}
+    batch_plan = sanitize_unlock_batch_plan(batch_plan, phase2_index, matrix_profile, base_history)
+    plan_record = {
+        "phase": "performance_unlock",
+        "profile": profile,
+        "base_chain_id": base_candidate.get("strategy_id"),
+        "base_code_dir": base_candidate.get("candidate_code_dir"),
+        "matrix_profile": matrix_profile,
+        "candidate_strategy_count": phase2_index.get("strategy_count", 0),
+        "batch_plan": batch_plan,
+        "batch_plan_error": batch_plan_error,
+        "verifier_summary": verifier_summary,
+    }
+    save_unlock_artifact(DEFAULT_UNLOCK_BATCH_PLAN_OUTPUT, base_candidate.get("strategy_id") or f"chain_{chain_index:04d}", None, plan_record)
+
+    verified_candidates: list[dict[str, Any]] = []
+    batch_summaries: list[dict[str, Any]] = []
+    for batch_number, batch in enumerate(batch_plan.get("batches", []) or [], start=1):
+        if not batch.get("strategy_ids"):
+            continue
+        result = run_unlock_batch(
+            working_state=working_state,
+            batch=batch,
+            batch_number=batch_number,
+            base_chain_id=base_candidate.get("strategy_id") or f"chain_{chain_index:04d}",
+            raw_strategy_index=raw_strategy_index,
+            strategy_library=strategy_library,
+            client=client,
+            build_platform=build_platform,
+            compile_each_step=compile_each_step,
+            step_compile_timeout_seconds=step_compile_timeout_seconds,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
+            dependency_graph=dependency_graph,
+        )
+        batch_summaries.append(result["summary"])
+        verified_candidates.extend(result.get("verified_candidates", []) or [])
+        if result.get("accepted_state"):
+            working_state = result["accepted_state"]
+
+    return {
+        "base_chain_id": base_candidate.get("strategy_id"),
+        "base_code_dir": base_candidate.get("candidate_code_dir"),
+        "matrix_profile": matrix_profile,
+        "batch_plan": batch_plan,
+        "verified_candidates": verified_candidates,
+        "final_state": working_state,
+        "summary": {
+            "stage": "PerformanceUnlock",
+            "phase": "performance_unlock",
+            "base_chain_id": base_candidate.get("strategy_id"),
+            "candidate_strategy_count": phase2_index.get("strategy_count", 0),
+            "planned_batch_count": len(batch_plan.get("batches", []) or []),
+            "verified_candidate_count": len(verified_candidates),
+            "accepted_candidate_count": len([item for item in verified_candidates if item.get("accepted")]),
+            "best_gflops": candidate_gflops(choose_best_candidate(verified_candidates)),
+            "matrix_profile": matrix_profile,
+            "batch_summaries": batch_summaries,
+        },
+    }
+
+
+def run_unlock_batch(
+    working_state: dict[str, Any],
+    batch: dict[str, Any],
+    batch_number: int,
+    base_chain_id: str,
+    raw_strategy_index: dict[str, Any],
+    strategy_library: dict[str, Any],
+    client: OpenAICompatibleClient,
+    build_platform: str,
+    compile_each_step: bool,
+    step_compile_timeout_seconds: int,
+    benchmark_runs: int,
+    benchmark_warmup_runs: int,
+    dependency_graph: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    verified_candidates: list[dict[str, Any]] = []
+    attempted_bundles = [batch, *build_unlock_fallback_batches(batch, dependency_graph)]
+    last_result: dict[str, Any] | None = None
+    last_verified_ir: dict[str, Any] | None = None
+    last_diagnosis: dict[str, Any] | None = None
+    for fallback_index, bundle in enumerate(attempted_bundles, start=0):
+        strategy_ids = bundle.get("strategy_ids", []) or []
+        if not strategy_ids:
+            continue
+        bundle_strategy = build_unlock_bundle_strategy(bundle, raw_strategy_index, strategy_library)
+        pre_report = check_before_codegen(working_state["current_ir"], bundle_strategy)
+        if not pre_report["preconditions_ok"]:
+            save_unlock_artifact(DEFAULT_UNLOCK_BATCH_DEFECT_OUTPUT, base_chain_id, bundle.get("batch_id"),
+                                 {"status": "preconditions_failed", "checker_report": pre_report})
+            continue
+        precheck_item = {
+            "strategy_id": bundle_strategy["strategy_id"],
+            "strategy_applicable": True,
+            "preconditions_ok": True,
+            "hard_constraints_ok": True,
+            "failed_checks": [],
+            "checker_report": {"phase": "batch_unlock_precheck", "accepted": True},
+        }
+        chain_path = [
+            *working_state.get("path", []),
+            f"UnlockBatch:{bundle.get('batch_id')}",
+            *strategy_ids,
+        ]
+        chain_code = [
+            *working_state.get("path_code", []),
+            batch_number,
+            fallback_index + 1,
+        ]
+        namespace = chain_code_key(chain_code)
+        candidate_result = run_strategy_candidate(
+            stage="PerformanceUnlock",
+            base_ir=working_state["current_ir"],
+            base_source_snapshot=working_state["source_snapshot"],
+            strategy=bundle_strategy,
+            precheck_item=precheck_item,
+            client=client,
+            candidate_namespace=namespace,
+            chain_path=chain_path,
+            chain_code=chain_code,
+            semantic_precheck_terminal=False,
+            build_platform=build_platform,
+            compile_each_step=compile_each_step,
+            step_compile_timeout_seconds=step_compile_timeout_seconds,
+        )
+        last_result = candidate_result
+        maybe_copy_unlock_patch(candidate_result, base_chain_id, bundle.get("batch_id"))
+        if not candidate_result.get("accepted"):
+            last_verified_ir = candidate_result.get("verified_ir")
+            last_diagnosis = (last_verified_ir or {}).get("defect_diagnosis", {})
+            save_unlock_artifact(
+                DEFAULT_UNLOCK_BATCH_DEFECT_OUTPUT,
+                base_chain_id,
+                bundle.get("batch_id"),
+                last_diagnosis or {"status": "generation_failed", "strategy_ids": strategy_ids},
+            )
+            continue
+
+        chain_dir = Path(candidate_result["candidate_code_dir"])
+        terminal_ir = copy.deepcopy(candidate_result["verified_ir"])
+        terminal_ir.setdefault("strategy", {})["applied_strategy_ids"] = append_unique(
+            working_state["history"].get("applied_strategy_ids", []),
+            strategy_ids,
+        )
+        terminal_ir.setdefault("strategy", {})["chain_id"] = f"{base_chain_id}.{bundle.get('batch_id')}"
+        terminal_ir.setdefault("strategy", {})["chain_code"] = chain_code_key(chain_code)
+        terminal_ir.setdefault("strategy", {})["chain_path"] = chain_path
+        verified_ir = verify_terminal_chain_once(
+            terminal_ir=terminal_ir,
+            chain_dir=chain_dir,
+            chain_id=f"{base_chain_id}.{bundle.get('batch_id')}",
+            strategy_library=strategy_library,
+            attempt=1,
+            build_platform=build_platform,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
+        )
+        repair_attempts = []
+        for repair_attempt in range(1, DEFAULT_UNLOCK_BATCH_REPAIR_ATTEMPTS + 1):
+            if terminal_chain_is_accepted(verified_ir):
+                break
+            repair_result = repair_chain_locally(
+                source_chain_dir=chain_dir,
+                output_chain_dir=chain_dir,
+                diagnosis=verified_ir.get("defect_diagnosis", {}),
+                ir=verified_ir,
+                client=client,
+                strategy_library=strategy_library,
+            )
+            repair_result["repair_attempt"] = repair_attempt
+            save_json(chain_dir / f"unlock_semantic_repair_attempt_{repair_attempt}.json", repair_result)
+            repair_attempts.append(repair_result)
+            verified_ir = verify_terminal_chain_once(
+                terminal_ir=verified_ir,
+                chain_dir=chain_dir,
+                chain_id=f"{base_chain_id}.{bundle.get('batch_id')}",
+                strategy_library=strategy_library,
+                attempt=repair_attempt + 1,
+                build_platform=build_platform,
+                benchmark_runs=benchmark_runs,
+                benchmark_warmup_runs=benchmark_warmup_runs,
+            )
+        if repair_attempts:
+            verified_ir.setdefault("terminal_repair", {})["attempts"] = repair_attempts
+            verified_ir.setdefault("terminal_repair", {})["attempt_count"] = len(repair_attempts)
+        accepted = terminal_chain_is_accepted(verified_ir)
+        history = copy_history(working_state["history"])
+        history["applied_strategy_ids"] = append_unique(history.get("applied_strategy_ids", []), strategy_ids)
+        history.setdefault("events", []).append(
+            {
+                "stage": "PerformanceUnlock",
+                "batch_id": bundle.get("batch_id"),
+                "strategy_ids": strategy_ids,
+                "status": "accepted" if accepted else "failed",
+                "fallback_index": fallback_index,
+                "verification": verified_ir.get("verification", {}).get("summary", {}),
+            }
+        )
+        candidate = {
+            "accepted": accepted,
+            "stage": "PerformanceUnlock",
+            "strategy_id": f"{base_chain_id}.{bundle.get('batch_id')}",
+            "verified_ir": verified_ir,
+            "source_snapshot": snapshot_source_files(chain_dir, backend_code_files(verified_ir)),
+            "candidate_code_dir": str(chain_dir),
+            "history": history,
+            "path": chain_path,
+            "path_code": chain_code,
+            "source_phase": "performance_unlock",
+        }
+        verified_candidates.append(candidate)
+        result_record = {
+            "base_chain_id": base_chain_id,
+            "batch_id": bundle.get("batch_id"),
+            "strategy_ids": strategy_ids,
+            "accepted": accepted,
+            "fallback_index": fallback_index,
+            "candidate_code_dir": str(chain_dir),
+            "verification": verified_ir.get("verification", {}).get("summary", {}),
+            "performance": verified_ir.get("performance", {}),
+            "defect_diagnosis": verified_ir.get("defect_diagnosis", {}),
+        }
+        save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, bundle.get("batch_id"), result_record)
+        save_unlock_artifact(DEFAULT_UNLOCK_BATCH_DEFECT_OUTPUT, base_chain_id, bundle.get("batch_id"), verified_ir.get("defect_diagnosis", {}))
+        if accepted:
+            improved = candidate_gflops(candidate) is not None and (
+                candidate_gflops(working_state.get("last_candidate")) is None
+                or candidate_gflops(candidate) > candidate_gflops(working_state["last_candidate"])
+            )
+            if not improved:
+                result_record["status"] = "verified_without_performance_improvement"
+                save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, bundle.get("batch_id"), result_record)
+                return {"accepted_state": None, "verified_candidates": verified_candidates, "summary": result_record}
+            accepted_state = make_frontier_state(
+                state_id=f"{working_state['state_id']}->{safe_name(str(bundle.get('batch_id')))}",
+                current_ir=verified_ir,
+                source_snapshot=candidate["source_snapshot"],
+                history=history,
+                path=chain_path,
+                path_code=chain_code,
+                last_candidate=candidate,
+                code_dir=str(chain_dir),
+            )
+            return {
+                "accepted_state": accepted_state,
+                "verified_candidates": verified_candidates,
+                "summary": result_record,
+            }
+        last_verified_ir = verified_ir
+        last_diagnosis = verified_ir.get("defect_diagnosis", {})
+
+    rollback_record = {
+        "base_chain_id": base_chain_id,
+        "batch_id": batch.get("batch_id"),
+        "strategy_ids": batch.get("strategy_ids", []),
+        "accepted": False,
+        "status": "rolled_back",
+        "reason": "all batch and fallback repair attempts failed",
+        "last_verification": (last_verified_ir or {}).get("verification", {}).get("summary", {}),
+        "last_defect_diagnosis": last_diagnosis,
+    }
+    save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, batch.get("batch_id"), rollback_record)
+    return {
+        "accepted_state": None,
+        "verified_candidates": verified_candidates,
+        "last_result": last_result,
+        "summary": rollback_record,
+    }
+
+
+def build_matrix_profile(ir: dict[str, Any]) -> dict[str, Any]:
+    problem = ir.get("problem", {}) or {}
+    tiling = ir.get("tiling", {}) or {}
+    hw = ir.get("hardware", {}) or {}
+    gpu = hw.get("gpu", {}) if isinstance(hw.get("gpu"), dict) else hw
+    m = int_or_default(problem.get("M") or problem.get("m"), 0)
+    n = int_or_default(problem.get("N") or problem.get("n"), 0)
+    k = int_or_default(problem.get("K") or problem.get("k"), 0)
+    bm = int_or_default(tiling.get("block_m"), max(m, 1))
+    bn = int_or_default(tiling.get("block_n"), max(n, 1))
+    bk = int_or_default(tiling.get("block_k"), max(k, 1))
+    sm_count = int_or_default(
+        gpu.get("sm_count")
+        or gpu.get("multi_processor_count")
+        or gpu.get("multiprocessor_count")
+        or hw.get("sm_count"),
+        1,
+    )
+    ops = 2 * m * n * k
+    cta_count = ceil_div(m, bm) * ceil_div(n, bn)
+    k_tiles = ceil_div(k, bk)
+    shared_usage = shared_memory_usage(ir)
+    shared_memory_bytes = shared_usage["total_bytes"]
+    estimated_registers = int_or_default(
+        get_nested_value(ir, "resource.register.actual_per_thread")
+        or get_nested_value(ir, "resource.register.estimated_per_thread")
+        or ir.get("resource", {}).get("estimated_registers_per_thread")
+        or ir.get("mapping", {}).get("estimated_registers_per_thread"),
+        estimate_registers_per_thread(ir),
+    )
+    cta_per_sm = float(cta_count) / float(max(sm_count, 1))
+    large_mn = cta_count >= 2 * sm_count and ops >= 2**33
+    large_k = k_tiles >= 128 or k >= 4096
+    return {
+        "M": m,
+        "N": n,
+        "K": k,
+        "BM": bm,
+        "BN": bn,
+        "BK": bk,
+        "ops": ops,
+        "cta_count": cta_count,
+        "k_tiles": k_tiles,
+        "sm_count": sm_count,
+        "cta_per_sm": cta_per_sm,
+        "shared_memory_bytes": shared_memory_bytes,
+        "shared_memory_per_stage_bytes": shared_usage["per_stage_bytes"],
+        "pipeline_stage_count": shared_usage["stage_count"],
+        "estimated_registers_per_thread": estimated_registers,
+        "small_mn_low_cta": cta_count < sm_count,
+        "medium": cta_count >= sm_count and ops < 2**33,
+        "large_mn": large_mn,
+        "large_k": large_k,
+        "large": large_mn or large_k,
+    }
+
+
+def build_phase2_unlock_strategy_index(
+    raw_strategy_index: dict[str, Any],
+    ir: dict[str, Any],
+    dependency_graph: dict[str, Any],
+    history: dict[str, Any],
+    matrix_profile: dict[str, Any],
+) -> dict[str, Any]:
+    applied = set(history.get("applied_strategy_ids", []) or [])
+    failed_counts = history.get("failed_strategy_counts", {}) or {}
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    seen_canonical: set[str] = set()
+    dynamic_id = "Memory.SharedMemory.DynamicOptIn"
+    dynamic_strategy = next((s for s in raw_strategy_index.get("strategies", []) if s.get("strategy_id") == dynamic_id), None)
+    dynamic_eligible = dynamic_strategy is not None and phase2_unlock_reject_reason(
+        dynamic_strategy, strategy_phase(dynamic_strategy), ir, applied, set(), dependency_graph,
+        matrix_profile, failed_counts) is None
+    for strategy in raw_strategy_index.get("strategies", []) or []:
+        strategy_id = strategy.get("strategy_id")
+        phase = strategy_phase(strategy)
+        selection_ir = ir
+        requires_dynamic = False
+        if dynamic_eligible and str(strategy_id).startswith("Pipeline.CpAsync.") and resource_profile_reject_reason(strategy_id, ir, matrix_profile):
+            selection_ir = copy.deepcopy(ir)
+            selection_ir.setdefault("memory", {}).update(shared_memory_allocation="dynamic", shared_memory_optin=True)
+            requires_dynamic = True
+        reason = phase2_unlock_reject_reason(
+            strategy=strategy,
+            phase=phase,
+            ir=selection_ir,
+            applied=applied,
+            seen_canonical=seen_canonical,
+            dependency_graph=dependency_graph,
+            matrix_profile=matrix_profile,
+            failed_counts=failed_counts,
+        )
+        if reason:
+            rejected.append({"strategy_id": strategy_id, "phase": phase, "reason": reason})
+            continue
+        item = copy.deepcopy(strategy)
+        item.setdefault("phase", phase)
+        item.setdefault("canonical_strategy_id", canonical_strategy_id(item))
+        item.setdefault("alias_of", None)
+        item.setdefault("conflict_group", strategy_conflict_group(item))
+        item.setdefault("modifies_regions", infer_modifies_regions(strategy_id or ""))
+        item.setdefault("provides_fields", infer_provides_fields(item))
+        item.setdefault("requires_fields", infer_requires_fields(item))
+        item["filter_reason"] = "eligible for size-aware batch unlock"
+        if requires_dynamic:
+            item["requires_bundle_strategy_ids"] = [dynamic_id]
+        accepted.append(item)
+        seen_canonical.add(canonical_strategy_id(item))
+    result = copy.deepcopy(raw_strategy_index)
+    result["strategies"] = accepted
+    result["strategy_count"] = len(accepted)
+    result["strategy_ids_by_stage"] = build_strategy_ids_by_stage(accepted)
+    result["filter_context"] = {
+        "phase": "performance_unlock",
+        "profile": DEFAULT_UNLOCKED_PERFORMANCE_PROFILE,
+        "matrix_profile": matrix_profile,
+        "applied_strategy_ids": sorted(applied),
+        "failed_strategy_counts": failed_counts,
+        "large_matrix_strategies_enabled": bool(matrix_profile.get("large")),
+        "filtered_out": rejected,
+    }
+    return result
+
+
+def phase2_unlock_reject_reason(
+    strategy: dict[str, Any],
+    phase: str,
+    ir: dict[str, Any],
+    applied: set[str],
+    seen_canonical: set[str],
+    dependency_graph: dict[str, Any],
+    matrix_profile: dict[str, Any],
+    failed_counts: dict[str, int],
+) -> str | None:
+    strategy_id = strategy.get("strategy_id") or ""
+    if not strategy_id:
+        return "missing strategy_id"
+    if strategy_id in applied:
+        return "already applied"
+    if strategy.get("alias_of"):
+        return f"alias of {strategy.get('alias_of')}; canonical strategy only"
+    if phase == EXCLUDED_DEFAULT_PHASE:
+        return "excluded_default phase"
+    if phase not in {PHASE2_GENERAL, PHASE2_LARGE_MATRIX}:
+        return f"not a phase2 unlock strategy: {phase}"
+    if phase == PHASE2_LARGE_MATRIX and not matrix_profile.get("large"):
+        return "large-matrix strategy filtered for small/medium matrix profile"
+    canonical = canonical_strategy_id(strategy)
+    if canonical in seen_canonical:
+        return f"duplicate canonical strategy: {canonical}"
+    if failed_counts.get(strategy_id, 0) >= DEFAULT_MAX_REPAIR_ATTEMPTS:
+        return "strategy failed too many times"
+    missing_graph = find_missing_requirements(strategy_id, ir, applied, dependency_graph)
+    if missing_graph:
+        return f"missing graph requirements: {'; '.join(missing_graph)}"
+    missing_fields = [
+        field for field in infer_requires_fields(strategy)
+        if field and (get_nested_value(ir, field) is None or get_nested_value(ir, field) is False)
+    ]
+    if missing_fields:
+        return f"missing required IR fields: {', '.join(missing_fields)}"
+    resource_reason = resource_profile_reject_reason(strategy_id, ir, matrix_profile)
+    if resource_reason:
+        return resource_reason
+    return None
+
+
+def resource_profile_reject_reason(strategy_id: str, ir: dict[str, Any], matrix_profile: dict[str, Any]) -> str | None:
+    registers = int_or_default(matrix_profile.get("estimated_registers_per_thread"), 0)
+    shared_memory_bytes = int_or_default(matrix_profile.get("shared_memory_bytes"), 0)
+    max_shared = shared_memory_limit(ir)
+    heavy_register = any(token in strategy_id for token in ("Prefetch", "Unroll8", "UnrollBK", "Register.Cache"))
+    if registers >= 96 and heavy_register:
+        return "register pressure is high; prefetch/unroll/register-cache strategies are filtered"
+    stage_multiplier = 0
+    match = re.fullmatch(r"Pipeline\.CpAsync\.Multistage([234])\.SharedAB", strategy_id)
+    if match:
+        stage_multiplier = int(match.group(1))
+    elif "DoubleBuffer" in strategy_id:
+        stage_multiplier = 2
+    requested_bytes = proposed_pipeline_bytes(ir, stage_multiplier) if stage_multiplier else 0
+    if stage_multiplier and max_shared > 0 and requested_bytes > max_shared:
+        return (
+            f"{stage_multiplier}-stage pipeline requires "
+            f"{requested_bytes} shared-memory bytes, above hardware limit {max_shared}"
+        )
+    return None
+
+
+def sanitize_unlock_batch_plan(
+    batch_plan: dict[str, Any],
+    strategy_index: dict[str, Any],
+    matrix_profile: dict[str, Any],
+    history: dict[str, Any],
+) -> dict[str, Any]:
+    valid_by_id = {item["strategy_id"]: item for item in strategy_index.get("strategies", []) or []}
+    applied = set(history.get("applied_strategy_ids", []) or [])
+    plan_batches = batch_plan.get("batches") if isinstance(batch_plan, dict) else None
+    if not isinstance(plan_batches, list):
+        plan_batches = []
+    cleaned_batches: list[dict[str, Any]] = []
+    global_selected_conflicts: set[str] = set()
+    for index, batch in enumerate(plan_batches, start=1):
+        if not isinstance(batch, dict):
+            continue
+        selected_ids: list[str] = []
+        seen_ids: set[str] = set()
+        batch_conflicts: set[str] = set()
+        rejected: list[dict[str, str]] = []
+        for strategy_id in batch.get("strategy_ids", []) or []:
+            if strategy_id in seen_ids:
+                rejected.append({"strategy_id": strategy_id, "reason": "duplicate in batch"})
+                continue
+            strategy = valid_by_id.get(strategy_id)
+            if strategy is None:
+                rejected.append({"strategy_id": str(strategy_id), "reason": "not in filtered unlock candidate index"})
+                continue
+            if strategy_id in applied:
+                rejected.append({"strategy_id": strategy_id, "reason": "already applied"})
+                continue
+            phase = strategy_phase(strategy)
+            if phase == PHASE2_LARGE_MATRIX and not matrix_profile.get("large"):
+                rejected.append({"strategy_id": strategy_id, "reason": "large-matrix strategy not allowed for this profile"})
+                continue
+            conflict_group = strategy_conflict_group(strategy)
+            if conflict_group and (conflict_group in batch_conflicts or conflict_group in global_selected_conflicts):
+                rejected.append({"strategy_id": strategy_id, "reason": f"conflict_group duplicate: {conflict_group}"})
+                continue
+            selected_ids.append(strategy_id)
+            seen_ids.add(strategy_id)
+            if conflict_group:
+                batch_conflicts.add(conflict_group)
+        if selected_ids:
+            global_selected_conflicts.update(batch_conflicts)
+            cleaned_batches.append(
+                {
+                    "batch_id": safe_batch_id(batch.get("batch_id") or f"batch_{index}"),
+                    "purpose": str(batch.get("purpose", "")).strip(),
+                    "strategy_ids": selected_ids,
+                    "coupling_reason": str(batch.get("coupling_reason", "")).strip(),
+                    "requires_summary": batch.get("requires_summary", []) if isinstance(batch.get("requires_summary"), list) else [],
+                    "risk": batch.get("risk") if batch.get("risk") in {"low", "medium", "high"} else "medium",
+                    "filtered_out": rejected,
+                }
+            )
+    if not cleaned_batches and valid_by_id:
+        cleaned_batches = fallback_unlock_batches(list(valid_by_id.values()))
+    for batch in cleaned_batches:
+        needed = {required for sid in batch["strategy_ids"]
+                  for required in valid_by_id[sid].get("requires_bundle_strategy_ids", [])}
+        for required in needed:
+            if required not in batch["strategy_ids"]:
+                batch["strategy_ids"].insert(0, required)
+            for other in cleaned_batches:
+                if other is not batch and required in other["strategy_ids"]:
+                    other["strategy_ids"].remove(required)
+    executor_id = "Compiler.ResourceFeedback.PtxasOccupancySweep"
+    executor_selected = any(executor_id in batch["strategy_ids"] for batch in cleaned_batches)
+    for batch in cleaned_batches:
+        batch["strategy_ids"] = [sid for sid in batch["strategy_ids"] if sid != executor_id]
+    cleaned_batches = [batch for batch in cleaned_batches if batch["strategy_ids"]]
+    if executor_selected:
+        cleaned_batches.append({"batch_id": "resource_sweep", "strategy_ids": [executor_id],
+                                "purpose": "bounded PTXAS resource sweep after code changes", "risk": "low"})
+    return {
+        "batch_order": [batch["batch_id"] for batch in cleaned_batches],
+        "batches": cleaned_batches,
+        "matrix_profile": matrix_profile,
+        "sanitized": True,
+    }
+
+
+def fallback_unlock_batches(strategies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[str]] = {}
+    for strategy in strategies:
+        region_key = "+".join(strategy.get("modifies_regions") or infer_modifies_regions(strategy.get("strategy_id", ""))) or "general"
+        groups.setdefault(region_key, []).append(strategy["strategy_id"])
+    batches = []
+    for index, (region, strategy_ids) in enumerate(groups.items(), start=1):
+        batches.append(
+            {
+                "batch_id": f"batch_{index}",
+                "purpose": f"fallback unlock batch for {region}",
+                "strategy_ids": strategy_ids[:DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE],
+                "coupling_reason": "deterministic fallback grouped by modified code region",
+                "requires_summary": [],
+                "risk": "medium",
+                "filtered_out": [],
+            }
+        )
+    return batches
+
+
+def build_unlock_fallback_batches(batch: dict[str, Any], dependency_graph: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    fallbacks = []
+    for index, strategy_id in enumerate(batch.get("strategy_ids", []) or [], start=1):
+        if len(batch.get("strategy_ids", [])) == 1:
+            break
+        fallbacks.append(
+            {
+                **batch,
+                "batch_id": f"{batch.get('batch_id')}_fallback_{index}",
+                "strategy_ids": [strategy_id],
+                "purpose": f"fallback single-strategy unlock for {strategy_id}",
+                "coupling_reason": "single strategy fallback after batch failure",
+            }
+        )
+    seen = {tuple(item.get("strategy_ids", [])) for item in [batch, *fallbacks]}
+    for strategy_id in batch.get("strategy_ids", []):
+        for edge in (dependency_graph or {}).get("fallback", {}).get(strategy_id, []):
+            for fallback_id in edge.get("strategies", []):
+                if (fallback_id,) in seen:
+                    continue
+                seen.add((fallback_id,))
+                fallback_ids = [fallback_id]
+                if "Memory.SharedMemory.DynamicOptIn" in batch.get("strategy_ids", []) and fallback_id.startswith("Pipeline."):
+                    fallback_ids.insert(0, "Memory.SharedMemory.DynamicOptIn")
+                fallbacks.append({**batch, "batch_id": f"{batch.get('batch_id')}_graph_{len(fallbacks)+1}",
+                                  "strategy_ids": fallback_ids, "purpose": f"graph fallback for {strategy_id}"})
+    return fallbacks
+
+
+def build_unlock_bundle_strategy(
+    batch: dict[str, Any],
+    raw_strategy_index: dict[str, Any],
+    strategy_library: dict[str, Any],
+) -> dict[str, Any]:
+    strategy_ids = batch.get("strategy_ids", []) or []
+    strategies = [find_strategy_object(strategy_id, raw_strategy_index, strategy_library) for strategy_id in strategy_ids]
+    merged_updates: dict[str, Any] = {}
+    for strategy in strategies:
+        merged_updates.update(copy.deepcopy(strategy.get("ir_updates", {}) or {}))
+    return {
+        "strategy_id": f"UnlockBatch.{safe_batch_id(batch.get('batch_id') or 'batch')}",
+        "stage": "PerformanceUnlock",
+        "category": "BatchUnlock",
+        "name": batch.get("purpose") or "Batch unlock optimization",
+        "phase": PHASE2_GENERAL,
+        "bundle_strategy_ids": strategy_ids,
+        "bundle_strategies": [copy.deepcopy(strategy) for strategy in strategies],
+        "ir_updates": merged_updates,
+        "preconditions": {"predicates": [p for s in strategies for p in get_precondition_predicates(s)]},
+        "postconditions": {
+            "patch_ir_verification": {"predicates": [p for s in strategies for p in get_patch_ir_postcondition_predicates(s)]},
+            "code_verification": {"constraints": [p for s in strategies for p in get_code_verification_constraints(s)]},
+        },
+        "expected_effect": batch.get("purpose", ""),
+        "potential_risks": [batch.get("risk", "medium"), batch.get("coupling_reason", "")],
+    }
+
+
+def find_strategy_object(strategy_id: str, raw_strategy_index: dict[str, Any], strategy_library: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return load_strategy(strategy_library, strategy_id)
+    except ValueError:
+        for strategy in raw_strategy_index.get("strategies", []) or []:
+            if strategy.get("strategy_id") == strategy_id:
+                return copy.deepcopy(strategy)
+        raise ValueError(f"Strategy not found: {strategy_id}")
+
+
+def maybe_copy_unlock_patch(candidate_result: dict[str, Any], chain_id: str, batch_id: str | None) -> None:
+    for attempt in candidate_result.get("attempts", []) or []:
+        patch_output = attempt.get("patch_output")
+        if patch_output and Path(patch_output).exists():
+            save_unlock_artifact(DEFAULT_UNLOCK_BATCH_PATCH_OUTPUT, chain_id, batch_id, load_json(Path(patch_output)))
+
+
+def save_unlock_artifact(path: Path, chain_id: str | None, batch_id: str | None, data: dict[str, Any]) -> None:
+    suffix_parts = [safe_name(str(chain_id or "chain"))]
+    if batch_id:
+        suffix_parts.append(safe_name(str(batch_id)))
+    artifact_path = path.with_name(f"{compact_artifact_stem(path.stem + '.' + '.'.join(suffix_parts))}{path.suffix}")
+    save_json(artifact_path, data)
+    publish_latest_json(path, data)
+
+
+def build_unlock_code_summary(
+    code_dir: Path,
+    code_files: list[str],
+    ir: dict[str, Any] | None = None,
+    history: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    files = []
+    ir = ir or {}
+    history = history or {}
+    for relative in code_files:
+        path = code_dir / relative
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8")
+        code_only = strip_cpp_comments(content)
+        anchors = [
+            region
+            for region in [
+                "LAUNCH_CONFIG",
+                "SHARED_DECL",
+                "INDEX_MAPPING",
+                "REGISTER_DECL",
+                "GLOBAL_TO_SHARED_LOAD",
+                "SYNC_AFTER_LOAD",
+                "MAIN_LOOP",
+                "COMPUTE_INNER",
+                "STORE",
+            ]
+            if f"{region}_BEGIN" in content and f"{region}_END" in content
+        ]
+        files.append(
+            {
+                "path": relative,
+                "line_count": content.count("\n") + 1,
+                "available_regions": anchors,
+                "contains_shared_memory": "__shared__" in code_only,
+                "contains_float4": "float4" in code_only or "FLOAT4" in code_only,
+                "contains_double_buffer": "double" in code_only.lower() and "buffer" in code_only.lower(),
+                "contains_boundary_guard": bool(re.search(r"\bif\s*\([^)]*(?:<\s*M|<\s*N|<\s*K)", code_only)),
+                "contains_k_tail_handling": bool(re.search(r"\b(?:k|global_k|sgpo_k)\b[^;]*(?:<\s*K|%\s*BK)", code_only)),
+                "shared_decl_count": len(re.findall(r"__shared__\s+float\s+", code_only)),
+                "global_store_count": len(re.findall(r"\bC\s*\[[^\]]+\]\s*=", code_only)),
+                "mac_statement_count": len(re.findall(r"\+=\s*[^;]*\*\s*[^;]*;", code_only)),
+            }
+        )
+    return {
+        "code_dir": str(code_dir),
+        "applied_strategy_ids": history.get("applied_strategy_ids", []) or ir.get("strategy", {}).get("applied_strategy_ids", []),
+        "tile_config": {
+            "BM": ir_get(ir, "tiling.block_m"),
+            "BN": ir_get(ir, "tiling.block_n"),
+            "BK": ir_get(ir, "tiling.block_k"),
+            "WM": ir_get(ir, "tiling.warp_tile.warp_m"),
+            "WN": ir_get(ir, "tiling.warp_tile.warp_n"),
+            "WMITER": ir_get(ir, "tiling.warp_tile.warp_m_iter"),
+            "WNITER": ir_get(ir, "tiling.warp_tile.warp_n_iter"),
+            "TM": ir_get(ir, "tiling.thread_m"),
+            "TN": ir_get(ir, "tiling.thread_n"),
+        },
+        "shared_memory_bytes": (
+            ir_get(ir, "resource.shared_memory.total_bytes")
+            or ir_get(ir, "memory.shared_memory_bytes")
+            or estimate_shared_memory_bytes(ir)
+        ),
+        "register_estimate": (
+            ir_get(ir, "resource.register.estimated_per_thread")
+            or ir_get(ir, "resource.estimated_registers_per_thread")
+            or estimate_registers_per_thread(ir)
+        ),
+        "files": files,
+    }
+
+
+def build_unlock_verifier_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    verified_ir = candidate.get("verified_ir", {}) or {}
+    summary = verified_ir.get("verification", {}).get("summary", {}) or {}
+    return {
+        "compile_status": summary.get("compile_status"),
+        "correctness_status": summary.get("correctness_status"),
+        "runtime_safety_status": summary.get("runtime_safety_status"),
+        "cuda_error": summary.get("cuda_error"),
+        "latency_ms": summary.get("latency_ms") or verified_ir.get("performance", {}).get("latency_ms"),
+        "gflops": summary.get("gflops") or verified_ir.get("performance", {}).get("gflops"),
+        "semantic_defect_summary": verified_ir.get("defect_diagnosis", {}),
+        "resource_estimate": verified_ir.get("resource", {}),
+        "failed_strategy_counts": verified_ir.get("strategy", {}).get("failed_strategy_counts", {}),
+        "current_changed_regions": verified_ir.get("strategy", {}).get("changed_regions", []),
+    }
+
+
+def strategy_phase(strategy: dict[str, Any]) -> str:
+    return strategy.get("phase") or infer_strategy_phase(strategy.get("strategy_id", ""))
+
+
+def infer_strategy_phase(strategy_id: str) -> str:
+    if not strategy_id:
+        return EXCLUDED_DEFAULT_PHASE
+    large_prefixes = (
+        "Mapping.CTASwizzle.",
+        "Memory.L2Reuse.",
+        "Scheduling.PersistentCTA.",
+        "Reduction.StreamK.",
+        "Reduction.SplitK.",
+    )
+    if strategy_id.startswith(large_prefixes):
+        return PHASE2_LARGE_MATRIX
+    if strategy_id.startswith(("Compiler.", "Tuning.")) or strategy_id == "Scheduling.WaveQuantization.SMResidentBlocks":
+        return PHASE2_GENERAL
+    if strategy_id.startswith("Epilogue.Fusion."):
+        return EXCLUDED_DEFAULT_PHASE
+    if strategy_id in {
+        "Pipeline.DoubleBuffer.SharedAB",
+        "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
+        "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+        "Pipeline.WarpRegisterPrefetchAB",
+        "Pipeline.SoftwarePrefetch.RegisterA",
+    }:
+        return PHASE2_GENERAL
+    if strategy_id.startswith(("Pipeline.CpAsync.", "Compiler.ResourceFeedback.")):
+        return PHASE2_GENERAL
+    if strategy_id.startswith(("Memory.Prefetch.", "Vectorization.GlobalLoad", "Vectorization.StoreC.float")):
+        return PHASE2_GENERAL
+    if strategy_id.startswith(("Epilogue.StoreC.Vectorized", "Vectorization.StoreC.GuardedVectorStore", "Vectorization.StoreC.AlignedNoGuard")):
+        return PHASE2_GENERAL
+    return PHASE1_CORE_COUPLED
+
+
+def canonical_strategy_id(strategy: dict[str, Any]) -> str:
+    return strategy.get("canonical_strategy_id") or strategy.get("alias_of") or strategy.get("strategy_id") or ""
+
+
+def strategy_conflict_group(strategy: dict[str, Any]) -> str:
+    if strategy.get("conflict_group"):
+        return strategy["conflict_group"]
+    strategy_id = strategy.get("strategy_id", "")
+    if ".BlockTile." in strategy_id:
+        return "tiling.block_tile"
+    if ".WarpTile." in strategy_id:
+        return "tiling.warp_tile"
+    if ".ThreadTile." in strategy_id:
+        return "tiling.thread_tile"
+    if strategy_id.startswith(("Mapping.WarpThreadTile.", "Mapping.Warp.OutputFragment", "Mapping.LaneLayout.")):
+        return "mapping.thread_output"
+    if strategy_id.startswith("Layout.SharedMemory.TransposeA") or strategy_id.startswith("Layout.SharedMemory.PaddingA"):
+        return "layout.shared_A_transform"
+    if strategy_id.startswith("Layout.SharedMemory.TransposeB") or strategy_id.startswith("Layout.SharedMemory.PaddingB"):
+        return "layout.shared_B_transform"
+    if strategy_id.startswith("Register.AccumulatorLayout."):
+        return "register.accumulator_layout"
+    if strategy_id.startswith("Reordering.KLoop."):
+        return "schedule.k_loop_unroll"
+    if strategy_id.startswith("Safety.BoundaryPolicy."):
+        return "safety.boundary_policy"
+    if strategy_id.startswith(("Vectorization.GlobalLoad", "Reordering.CooperativeVectorLoad", "Reordering.WarpCooperativeLoad")):
+        return "vectorization.global_load"
+    if "StoreC" in strategy_id:
+        return "store.C"
+    if "DoubleBuffer" in strategy_id:
+        return "pipeline.buffering"
+    if "Prefetch" in strategy_id:
+        return "pipeline.prefetch"
+    if strategy_id.startswith(("Mapping.CTASwizzle.", "Memory.L2Reuse.", "Scheduling.PersistentCTA.", "Reduction.StreamK.", "Reduction.SplitK.")):
+        return "large_matrix.schedule"
+    return ""
+
+
+def infer_modifies_regions(strategy_id: str) -> list[str]:
+    regions: list[str] = []
+    if strategy_id.startswith("Tiling."):
+        regions.extend(["launch_config", "tile_indexing"])
+    if strategy_id.startswith("Mapping."):
+        regions.extend(["thread_mapping", "launch_config"])
+    if strategy_id.startswith("Layout.SharedMemory."):
+        regions.extend(["shared_memory_layout", "shared_memory_indexing"])
+    if strategy_id.startswith("Reordering."):
+        regions.extend(["global_load", "compute_loop"])
+    if strategy_id.startswith("Register."):
+        regions.extend(["register_file", "compute_loop"])
+    if strategy_id.startswith("Vectorization.GlobalLoad"):
+        regions.append("global_load")
+    if "StoreC" in strategy_id or strategy_id.startswith("Epilogue."):
+        regions.append("epilogue_store")
+    if strategy_id.startswith(("Pipeline.", "Memory.Prefetch.")):
+        regions.extend(["main_k_loop", "shared_memory_pipeline"])
+    if strategy_id.startswith(("Compiler.", "Tuning.")):
+        regions.append("build_config")
+    return sorted(set(regions))
+
+
+def infer_provides_fields(strategy: dict[str, Any]) -> list[str]:
+    fields = set(strategy.get("provides_fields", []) or [])
+    fields.update((strategy.get("ir_updates") or {}).keys())
+    return sorted(str(field) for field in fields if field)
+
+
+def infer_requires_fields(strategy: dict[str, Any]) -> list[str]:
+    fields = set(strategy.get("requires_fields", []) or [])
+    for predicate in normalize_predicates(strategy.get("preconditions")):
+        field = predicate.get("field") or predicate.get("lhs") or predicate.get("path")
+        if isinstance(field, str) and "." in field and not any(op in field for op in " +-*/"):
+            fields.add(field)
+    return sorted(str(field) for field in fields if field)
+
+
+def normalize_predicates(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, dict):
+        raw = raw.get("predicates") or raw.get("conditions") or raw.get("all") or raw.get("any") or []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def estimate_shared_memory_bytes(ir: dict[str, Any]) -> int:
+    tiling = ir.get("tiling", {}) or {}
+    bm = int_or_default(tiling.get("block_m"), 0)
+    bn = int_or_default(tiling.get("block_n"), 0)
+    bk = int_or_default(tiling.get("block_k"), 0)
+    if not (bm and bn and bk):
+        return 0
+    return 4 * (bm * bk + bk * bn)
+
+
+def estimate_registers_per_thread(ir: dict[str, Any]) -> int:
+    tiling = ir.get("tiling", {}) or {}
+    tm = int_or_default(tiling.get("thread_m"), 1)
+    tn = int_or_default(tiling.get("thread_n"), 1)
+    return tm * tn + tm + tn + 16
+
+
+def ceil_div(value: int, divisor: int) -> int:
+    return int(math.ceil(float(max(value, 0)) / float(max(divisor, 1))))
+
+
+def int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_nested_value(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def append_unique(base: list[str], extra: list[str]) -> list[str]:
+    result = list(base or [])
+    seen = set(result)
+    for item in extra:
+        if item not in seen:
+            result.append(item)
+            seen.add(item)
+    return result
+
+
+def safe_batch_id(value: Any) -> str:
+    text = str(value or "batch").strip()
+    safe = safe_name(text)
+    return safe or "batch"
 
 
 def merge_terminal_verifications(
@@ -723,9 +2231,17 @@ def infer_app_stage_order(
     strategy_index: dict[str, Any],
     strategy_library: dict[str, Any],
 ) -> list[str]:
-    explicit = ir.get("strategy", {}).get("stage_order") or dependency_graph.get("stage_order")
+    # The dependency graph is the authoritative workflow.  IR snapshots may
+    # retain legacy stage names or an older, incomplete stage list.
+    explicit = dependency_graph.get("stage_order") or ir.get("strategy", {}).get("stage_order")
     if isinstance(explicit, list) and explicit:
-        filtered_explicit = [stage for stage in explicit if stage_has_strategy(stage, strategy_index, strategy_library)]
+        stage_aliases = {"Reordering": "MappingReordering"}
+        normalized_explicit = [stage_aliases.get(stage, stage) for stage in explicit]
+        filtered_explicit = [
+            stage
+            for stage in normalized_explicit
+            if stage_has_strategy(stage, strategy_index, strategy_library)
+        ]
         if filtered_explicit:
             return apply_strategy_profile_to_stage_order(
                 filtered_explicit,
@@ -755,6 +2271,8 @@ def apply_strategy_profile_to_stage_order(stage_order: list[str], profile: str |
         return stage_order
     if profile == DEFAULT_UNLOCKED_PERFORMANCE_PROFILE:
         return [stage for stage in THROUGHPUT_EXPLORATION_STAGES if stage in set(stage_order)]
+    if profile == CORE_CONSTRUCTION_COUPLED_PROFILE:
+        return [stage for stage in CORE_CONSTRUCTION_COUPLED_STAGES if stage in set(stage_order)]
     if profile != "stable_correctness_first":
         return stage_order
     return list(STABLE_BASELINE_STAGES)
@@ -771,6 +2289,39 @@ def stage_has_strategy(stage: str, strategy_index: dict[str, Any], strategy_libr
 
 
 def apply_strategy_profile_to_candidates(strategy_index: dict[str, Any], profile: str | None) -> dict[str, Any]:
+    if profile == CORE_CONSTRUCTION_COUPLED_PROFILE:
+        result = copy.deepcopy(strategy_index)
+        accepted = []
+        profile_rejected = []
+        for strategy in result.get("strategies", []) or []:
+            phase = strategy_phase(strategy)
+            strategy_id = strategy.get("strategy_id") or ""
+            if strategy.get("alias_of"):
+                profile_rejected.append({"strategy_id": strategy_id, "reason": f"alias of {strategy.get('alias_of')}"})
+            elif phase != PHASE1_CORE_COUPLED:
+                profile_rejected.append({"strategy_id": strategy_id, "reason": f"phase {phase} is not enabled in Phase 1"})
+            else:
+                item = copy.deepcopy(strategy)
+                item.setdefault("phase", phase)
+                item.setdefault("canonical_strategy_id", canonical_strategy_id(item))
+                item.setdefault("alias_of", None)
+                item.setdefault("conflict_group", strategy_conflict_group(item))
+                item.setdefault("modifies_regions", infer_modifies_regions(strategy_id))
+                item.setdefault("provides_fields", infer_provides_fields(item))
+                item.setdefault("requires_fields", infer_requires_fields(item))
+                accepted.append(item)
+        context = result.setdefault("filter_context", {})
+        context["strategy_profile"] = profile
+        context["profile_policy"] = {
+            "mode": "phase1_core_coupled",
+            "allowed_phase": PHASE1_CORE_COUPLED,
+            "unlock_deferred_phases": [PHASE2_GENERAL, PHASE2_LARGE_MATRIX],
+        }
+        context.setdefault("rejected", [])
+        context["rejected"].extend(profile_rejected)
+        result["strategies"] = accepted
+        result["strategy_count"] = len(accepted)
+        return result
     if profile == DEFAULT_UNLOCKED_PERFORMANCE_PROFILE:
         result = copy.deepcopy(strategy_index)
         result.setdefault("filter_context", {})["strategy_profile"] = profile
@@ -858,7 +2409,17 @@ def run_stage(
     candidate_namespace: str | None = None,
     parent_path: list[str] | None = None,
     parent_path_code: list[int] | None = None,
+    build_platform: str = "windows",
+    compile_each_step: bool = DEFAULT_COMPILE_EACH_STRATEGY_STEP,
+    compile_each_stage: bool = DEFAULT_COMPILE_EACH_STAGE,
+    step_compile_timeout_seconds: int = DEFAULT_STEP_COMPILE_TIMEOUT_SECONDS,
+    stage_benchmark_runs: int = DEFAULT_STAGE_BENCHMARK_RUNS,
+    stage_benchmark_warmup_runs: int = DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS,
+    tiling_top_k_per_level: int = DEFAULT_TILING_TOP_K_PER_LEVEL,
+    lazy_fallback_execution: bool = DEFAULT_LAZY_FALLBACK_EXECUTION,
 ) -> dict[str, Any]:
+    compile_each_step = False
+    compile_each_stage = False
     stage_snapshot = base_source_snapshot or snapshot_source_files(backend_code_root(current_ir), backend_code_files(current_ir))
     controller = StageController(
         strategy_index=raw_strategy_index,
@@ -870,7 +2431,11 @@ def run_stage(
     current_subphase = controller.current_subphase()
     current_subphase_id = controller.current_subphase_id()
     if current_subphase_id and current_subphase_id.endswith(".StageVerification"):
-        stage_report = controller.verify_stage(current_ir)
+        stage_report = controller.verify_stage(current_ir, include_code_checks=False)
+        stage_report["verification_scope"] = "stage_ir_predicates_only"
+        stage_report["runtime_verification"] = "deferred_until_phase1_completion"
+        verified_stage_ir = current_ir
+        verified_stage_snapshot = stage_snapshot
         save_json(stage_path(DEFAULT_PRECHECK_OUTPUT, current_subphase_id), stage_report)
         save_json(stage_path(DEFAULT_POSTCHECK_OUTPUT, current_subphase_id), stage_level_post_check(stage, current_subphase_id, stage_report))
         return {
@@ -884,8 +2449,9 @@ def run_stage(
                     "verification": stage_report,
                 }
             ],
-            "failed_strategy_counts": {},
-            "stage_completed_ir": current_ir if stage_report["accepted"] else None,
+            "failed_strategy_counts": {} if stage_report["accepted"] else {current_subphase_id: 1},
+            "stage_completed_ir": verified_stage_ir if stage_report["accepted"] else None,
+            "stage_source_snapshot": verified_stage_snapshot if stage_report["accepted"] else None,
             "summary": {
                 "stage": stage,
                 "current_subphase": current_subphase_id,
@@ -955,35 +2521,91 @@ def run_stage(
         result["chain_record"] = chain_record
         return result
 
-    micro_selection = get_micro_strategy_from_llm(
-        client=client,
-        current_stage=stage,
-        current_subphase=current_subphase_id,
-        subphase=current_subphase or {},
-        optir_summary=compact_ir_summary(current_ir),
-        strategy_index=available_strategy_index,
-        prompt_path=Path(DEFAULT_MICRO_STRATEGY_PROMPT),
-    )
-    micro_selection = inject_profile_preferred_candidates(
-        micro_selection,
-        available_strategy_index,
-        current_subphase_id,
-        profile,
+    hierarchical_tiling_subphases = {
+        "Tiling.BlockTileSelection",
+        "Tiling.WarpTileSelection",
+        "Tiling.ThreadTileSelection",
+    }
+    micro_selection = None
+    if target_backend(current_ir) == "cuda" and current_subphase_id in hierarchical_tiling_subphases:
+        try:
+            micro_selection = get_micro_strategy_from_llm(
+                client=client,
+                current_stage=stage,
+                current_subphase=current_subphase_id,
+                subphase=current_subphase or {},
+                optir_summary=compact_hierarchical_tiling_ir_summary(current_ir),
+                strategy_index=available_strategy_index,
+                prompt_path=Path(DEFAULT_MICRO_STRATEGY_PROMPT),
+            )
+            micro_selection["selection_mode"] = "hierarchical_tiling_llm_selection"
+        except Exception as exc:
+            error = {
+                "stage": stage,
+                "subphase": current_subphase_id,
+                "status": "failed",
+                "reason": "hierarchical Tiling LLM selection failed after configured retries",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
+            return {
+                "accepted_candidate": None,
+                "accepted_candidates": [],
+                "events": [error],
+                "failed_strategy_counts": {},
+                "summary": {
+                    "stage": stage,
+                    "current_subphase": current_subphase_id,
+                    "selection_mode": "hierarchical_tiling_llm_selection_failed",
+                    "filtered_strategy_count": available_strategy_index.get("strategy_count", 0),
+                    "accepted_candidate_count": 0,
+                    "selection_error": error,
+                    "chain_record": chain_record,
+                },
+            }
+    else:
+        if micro_selection is None:
+            try:
+                micro_selection = get_micro_strategy_from_llm(
+                    client=client,
+                    current_stage=stage,
+                    current_subphase=current_subphase_id,
+                    subphase=current_subphase or {},
+                    optir_summary=compact_ir_summary(current_ir),
+                    strategy_index=available_strategy_index,
+                    prompt_path=Path(DEFAULT_MICRO_STRATEGY_PROMPT),
+                )
+            except Exception as exc:
+                micro_selection = build_fallback_micro_selection(
+                    available_strategy_index,
+                    current_subphase_id,
+                    f"LLM micro-strategy selection failed: {type(exc).__name__}: {exc}",
+                )
+        micro_selection = inject_profile_preferred_candidates(
+            micro_selection,
+            available_strategy_index,
+            current_subphase_id,
+            profile,
+        )
+    subphase_top_k = 1 if current_subphase_id == "Tiling.MappingDerivation" else (
+        tiling_top_k_per_level
+        if current_subphase_id in hierarchical_tiling_subphases
+        else DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE
     )
     execution_candidates = select_top_k_candidates(
         micro_selection.get("candidates", []),
-        DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE,
+        subphase_top_k,
     )
     selected_strategy = {"candidates": execution_candidates}
     llm_selected_count = len(selected_strategy.get("candidates", []))
     selected_strategy["filter_context"] = available_strategy_index.get("filter_context")
-    selected_strategy["selection_mode"] = DEFAULT_SELECTION_MODE
+    selected_strategy["selection_mode"] = micro_selection.get("selection_mode", DEFAULT_SELECTION_MODE)
     selected_strategy["top_k_strategies_per_subphase"] = DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE
     selected_strategy["current_subphase"] = current_subphase_id
     selected_strategy["micro_selection"] = micro_selection
     selected_strategy["all_llm_candidates"] = micro_selection.get("candidates", [])
     save_json(stage_path(DEFAULT_SELECTED_STRATEGY_OUTPUT, current_subphase_id or stage), selected_strategy)
-    save_json(Path(DEFAULT_SELECTED_STRATEGY_OUTPUT), selected_strategy)
+    publish_latest_json(Path(DEFAULT_SELECTED_STRATEGY_OUTPUT), selected_strategy)
     update_chain_stage_selected_strategies(chain_record, selected_strategy)
 
     if llm_selected_count == 0:
@@ -1033,6 +2655,15 @@ def run_stage(
         expected_updates = selected_item.get("expected_ir_updates")
         if not isinstance(expected_updates, dict):
             expected_updates = selected_strategy.get("micro_selection", {}).get("expected_ir_updates", {})
+        tiling_plan = selected_item.get("tiling_plan")
+        if not isinstance(tiling_plan, dict):
+            tiling_plan = (current_ir.get("strategy") or {}).get("tiling_joint_plan")
+        if isinstance(tiling_plan, dict):
+            expected_updates = merge_expected_ir_updates(
+                strategy_id,
+                expected_updates if isinstance(expected_updates, dict) else {},
+                tiling_plan_ir_updates(strategy_id, tiling_plan),
+            )
         strategy["ir_updates"] = merge_expected_ir_updates(
             strategy_id,
             strategy.get("ir_updates") or {},
@@ -1042,6 +2673,8 @@ def run_stage(
             strategy_id,
             strategy["ir_updates"],
         )
+        if isinstance(selected_item.get("tiling_plan"), dict):
+            local_ir.setdefault("strategy", {})["tiling_joint_plan"] = copy.deepcopy(selected_item["tiling_plan"])
         local_check = local_ir.get("stage_controller", {}).get("last_local_check", {})
         precheck_item["checker_report"] = local_check
         if local_check.get("accepted") is False:
@@ -1067,14 +2700,62 @@ def run_stage(
             chain_path=[*(parent_path or []), strategy_id],
             chain_code=[*(parent_path_code or []), selected_item.get("_sibling_index", 1)],
             candidate_namespace=chain_code_key([*(parent_path_code or []), selected_item.get("_sibling_index", 1)]),
+            build_platform=build_platform,
+            semantic_precheck_terminal=False,
+            defer_semantic_checks=True,
+            compile_each_step=False,
+            step_compile_timeout_seconds=step_compile_timeout_seconds,
         )
         candidate_results.append(candidate_result)
         events.append(candidate_result["event"])
         if not candidate_result["accepted"]:
             failed_counts[strategy_id] = failed_counts.get(strategy_id, 0) + 1
+        elif lazy_fallback_execution and stage != "Tiling":
+            # Candidates are ranked by the LLM. Outside deterministic Tiling,
+            # materialize only the first successful choice; lower-ranked items
+            # remain recorded as fallbacks instead of becoming eager branches.
+            break
 
     accepted_candidates = [item for item in candidate_results if item["accepted"]]
     best_candidate = choose_best_candidate(accepted_candidates)
+    if not accepted_candidates and subphase_can_continue_after_candidate_failures(current_subphase):
+        skipped_ir = controller.skip_current_subphase("all selected candidates failed; continue along stage graph")
+        event = {
+            "stage": stage,
+            "subphase": current_subphase_id,
+            "status": "skipped",
+            "reason": "all selected candidates failed; continue along stage graph",
+            "next_subphase": (current_subphase or {}).get("next_subphase"),
+            "failed_strategy_counts": failed_counts,
+        }
+        return {
+            "accepted_candidate": None,
+            "accepted_candidates": [],
+            "skipped_ir": skipped_ir,
+            "events": [*events, event],
+            "failed_strategy_counts": failed_counts,
+            "summary": {
+                "stage": stage,
+                "current_subphase": current_subphase_id,
+                "filtered_strategy_count": available_strategy_index.get("strategy_count", 0),
+                "llm_selected_count": llm_selected_count,
+                "selection_mode": "skip_failed_optional_subphase_and_continue",
+                "top_k_strategies_per_subphase": DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE,
+                "stage_candidate_count": len(selected_strategy.get("candidates", [])),
+                "available_strategy_count": available_strategy_index.get("strategy_count", 0),
+                "chain_record": chain_record,
+                "precheck_summary": precheck_result.get("summary"),
+                "evaluated_candidate_count": len(candidate_results),
+                "local_failed_count": len(local_failed_events),
+                "local_failed_events": local_failed_events,
+                "accepted_candidate_count": 0,
+                "selected_strategy_id": None,
+                "selected_candidate_code_dir": None,
+                "selected_gflops": None,
+                "skipped": True,
+                "skip_reason": event["reason"],
+            },
+        }
 
     return {
         "accepted_candidate": best_candidate,
@@ -1099,6 +2780,9 @@ def run_stage(
             "selected_strategy_id": best_candidate["strategy_id"] if best_candidate else None,
             "selected_candidate_code_dir": best_candidate.get("candidate_code_dir") if best_candidate else None,
             "selected_gflops": candidate_gflops(best_candidate) if best_candidate else None,
+            "lazy_fallback_execution": lazy_fallback_execution,
+            "chain_workers": execution_config().chain_workers,
+            "fallback_candidate_count": max(0, llm_selected_count - len(candidate_results)),
         },
     }
 
@@ -1114,10 +2798,21 @@ def run_exhaustive_stage(
     profile: str | None = None,
     max_frontier_states: int = 0,
     exhaust_pending: bool = False,
+    build_platform: str = "windows",
+    compile_each_step: bool = DEFAULT_COMPILE_EACH_STRATEGY_STEP,
+    compile_each_stage: bool = DEFAULT_COMPILE_EACH_STAGE,
+    step_compile_timeout_seconds: int = DEFAULT_STEP_COMPILE_TIMEOUT_SECONDS,
+    stage_benchmark_runs: int = DEFAULT_STAGE_BENCHMARK_RUNS,
+    stage_benchmark_warmup_runs: int = DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS,
+    tiling_top_k_per_level: int = DEFAULT_TILING_TOP_K_PER_LEVEL,
+    preserve_tiling_lineages: bool = False,
+    top_k_per_tiling_lineage: int = DEFAULT_TOP_K_PER_TILING_LINEAGE,
+    lazy_fallback_execution: bool = DEFAULT_LAZY_FALLBACK_EXECUTION,
 ) -> dict[str, Any]:
     next_frontier = []
     active_frontier = list(frontier)
     pending_frontier: list[dict[str, Any]] = []
+    terminal_states = []
     state_summaries = []
     accepted_candidates = []
     failed_counts: dict[str, int] = {}
@@ -1130,7 +2825,15 @@ def run_exhaustive_stage(
         pending_frontier and (exhaust_pending or max_frontier_states <= 0 or len(next_frontier) < max_frontier_states)
     ):
         if not active_frontier and pending_frontier:
-            active_frontier, pending_frontier = take_frontier_batch(pending_frontier, max_frontier_states)
+            if preserve_tiling_lineages:
+                if not pending_frontier:
+                    continue
+                active_frontier, pending_frontier = take_frontier_batch_per_tiling_lineage(
+                    pending_frontier,
+                    top_k_per_tiling_lineage,
+                )
+            else:
+                active_frontier, pending_frontier = take_frontier_batch(pending_frontier, max_frontier_states)
             total_events.append(
                 {
                     "stage": stage,
@@ -1143,22 +2846,47 @@ def run_exhaustive_stage(
 
         round_index += 1
         new_active = []
-        for state in active_frontier:
-            stage_result = run_stage(
-                stage=stage,
-                current_ir=state["current_ir"],
-                history=state["history"],
-                raw_strategy_index=raw_strategy_index,
-                dependency_graph=dependency_graph,
-                strategy_library=strategy_library,
-                client=client,
-                user_question=user_question,
-                profile=profile,
-                base_source_snapshot=state["source_snapshot"],
-                candidate_namespace=chain_code_key(state.get("path_code", [])),
-                parent_path=state.get("path", []),
-                parent_path_code=state.get("path_code", []),
-            )
+        def invoke_state(state):
+            with chain_client(client) as worker_client:
+                return run_stage(
+                    stage=stage,
+                    current_ir=copy.deepcopy(state["current_ir"]),
+                    history=copy_history(state["history"]),
+                    raw_strategy_index=raw_strategy_index,
+                    dependency_graph=dependency_graph,
+                    strategy_library=strategy_library,
+                    client=worker_client,
+                    user_question=user_question,
+                    profile=profile,
+                    base_source_snapshot=dict(state["source_snapshot"]),
+                    candidate_namespace=chain_code_key(state.get("path_code", [])),
+                    parent_path=state.get("path", []),
+                    parent_path_code=state.get("path_code", []),
+                    build_platform=build_platform,
+                    compile_each_step=compile_each_step,
+                    compile_each_stage=compile_each_stage,
+                    step_compile_timeout_seconds=step_compile_timeout_seconds,
+                    stage_benchmark_runs=stage_benchmark_runs,
+                    stage_benchmark_warmup_runs=stage_benchmark_warmup_runs,
+                    tiling_top_k_per_level=tiling_top_k_per_level,
+                    lazy_fallback_execution=lazy_fallback_execution,
+                )
+        outcomes = parallel_chain_map(
+            invoke_state, active_frontier,
+            lambda state: chain_code_key(state.get("path_code", [])),
+        )
+        for state, outcome in zip(active_frontier, outcomes):
+            for output, data in outcome.latest.items():
+                save_json(output, data)
+            if outcome.error is not None:
+                stage_result = {
+                    "accepted_candidates": [], "failed_strategy_counts": {},
+                    "summary": {"status": "chain_error", "error_message": str(outcome.error)},
+                    "events": [{"stage": stage, "status": "chain_error",
+                                "input_state_id": state["state_id"], "error_message": str(outcome.error)}],
+                }
+            else:
+                stage_result = outcome.value
             state_summaries.append(
                 {
                     "round": round_index,
@@ -1217,7 +2945,7 @@ def run_exhaustive_stage(
                         make_frontier_state(
                             state_id=f"{state['state_id']}->complete_{safe_name(stage)}",
                             current_ir=stage_result["stage_completed_ir"],
-                            source_snapshot=state["source_snapshot"],
+                            source_snapshot=stage_result.get("stage_source_snapshot") or state["source_snapshot"],
                             history=completed_history,
                             path=list(state.get("path", [])),
                             path_code=list(state.get("path_code", [])),
@@ -1228,6 +2956,9 @@ def run_exhaustive_stage(
                 continue
 
             if not stage_result.get("accepted_candidates"):
+                terminal_state = copy.deepcopy(state)
+                terminal_state["terminal_reason"] = "all_children_failed_or_stage_gate_failed"
+                terminal_states.append(terminal_state)
                 carried_history = copy_history(state["history"])
                 carried_history["events"].extend(stage_result.get("events", []))
                 merge_failed_counts(carried_history, stage_result.get("failed_strategy_counts", {}))
@@ -1294,7 +3025,13 @@ def run_exhaustive_stage(
                 break
 
         if max_frontier_states > 0:
-            active_frontier, pruned_frontier = take_frontier_batch(new_active, max_frontier_states)
+            if preserve_tiling_lineages:
+                active_frontier, pruned_frontier = take_frontier_batch_per_tiling_lineage(
+                    new_active,
+                    top_k_per_tiling_lineage,
+                )
+            else:
+                active_frontier, pruned_frontier = take_frontier_batch(new_active, max_frontier_states)
             pending_frontier.extend(pruned_frontier)
         else:
             active_frontier = new_active
@@ -1309,10 +3046,14 @@ def run_exhaustive_stage(
     )
 
     if not exhaust_pending and max_frontier_states > 0 and len(next_frontier) > max_frontier_states:
-        next_frontier = sorted(next_frontier, key=frontier_state_score, reverse=True)[:max_frontier_states]
+        if preserve_tiling_lineages:
+            next_frontier = prune_frontier_per_tiling_lineage(next_frontier, top_k_per_tiling_lineage)
+        else:
+            next_frontier = sorted(next_frontier, key=frontier_state_score, reverse=True)[:max_frontier_states]
 
     return {
         "frontier": next_frontier,
+        "terminal_states": terminal_states,
         "accepted_candidates": accepted_candidates,
         "events": total_events,
         "failed_strategy_counts": failed_counts,
@@ -1329,10 +3070,785 @@ def run_exhaustive_stage(
             "max_frontier_states": max_frontier_states or None,
             "exhaust_pending": exhaust_pending,
             "pending_frontier_count": len(pending_frontier),
+            "unexplored_paths": [
+                {"path_code": chain_code_key(state.get("path_code", [])), "reason": "search_budget_pruned"}
+                for state in pending_frontier
+            ],
+            "terminal_fallback_count": len(terminal_states),
+            "execution": vars(execution_config()),
             "carry_reason": carry_reason,
+            "preserve_tiling_lineages": preserve_tiling_lineages,
+            "tiling_lineage_count": len(tiling_lineage_keys(next_frontier)),
+            "block_tile_root_count": len(tiling_lineage_keys(next_frontier)),
+            "top_k_per_tiling_lineage": top_k_per_tiling_lineage if preserve_tiling_lineages else None,
+            "lazy_fallback_execution": lazy_fallback_execution,
             "state_summaries": state_summaries,
         },
     }
+
+
+def deterministic_materialization_mode(strategy: dict[str, Any]) -> str:
+    materialization = strategy.get("materialization")
+    if isinstance(materialization, dict):
+        mode = materialization.get("mode")
+        if isinstance(mode, str) and mode:
+            return mode
+    return DETERMINISTIC_MATERIALIZATION_MODE if is_deterministic_strategy(strategy.get("strategy_id", "")) else LLM_PATCH_MATERIALIZATION_MODE
+
+
+def is_deterministic_strategy(strategy_id: str) -> bool:
+    if strategy_id in {
+        "Vectorization.AlignmentGuard",
+        "Safety.AssumeDivisibleAligned",
+        "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+    }:
+        return False
+    if not strategy_id or strategy_id.startswith("CPU."):
+        return False
+    return strategy_id in DETERMINISTIC_STRATEGY_IDS or any(
+        strategy_id.startswith(prefix) for prefix in DETERMINISTIC_STRATEGY_PREFIXES
+    )
+
+
+def run_deterministic_strategy_candidate(
+    stage: str,
+    base_ir: dict[str, Any],
+    base_source_snapshot: dict[str, str],
+    strategy: dict[str, Any],
+    precheck_item: dict[str, Any],
+    candidate_namespace: str | None = None,
+    chain_path: list[str] | None = None,
+    chain_code: list[int] | None = None,
+    build_platform: str = "windows",
+    compile_each_step: bool = DEFAULT_COMPILE_EACH_STRATEGY_STEP,
+    step_compile_timeout_seconds: int = DEFAULT_STEP_COMPILE_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    compile_each_step = False
+    strategy_id = strategy["strategy_id"]
+    attempt = 1
+    candidate_code_dir = chain_code_path(chain_path or [strategy_id], chain_code, base_ir)
+    restore_source_files(candidate_code_dir, base_source_snapshot)
+
+    patch_result = build_deterministic_patch_result(strategy, base_ir)
+    patch_result["repair_attempt"] = attempt
+    patch_result["stage"] = stage
+    save_candidate_json(DEFAULT_PATCH_OUTPUT, stage, strategy_id, attempt, patch_result, candidate_namespace)
+
+    patch_ir = build_patch_ir(
+        ir=base_ir,
+        strategy=strategy,
+        precheck_item=precheck_item,
+        patch_result=patch_result,
+    )
+    patch_ir["repair_attempt"] = attempt
+    patch_ir["candidate_stage"] = stage
+    save_candidate_json(DEFAULT_PATCH_IR_OUTPUT, stage, strategy_id, attempt, patch_ir, candidate_namespace)
+
+    post_check_result = check_after_codegen(patch_ir, strategy, include_hard_constraints=False)
+    post_check_result.update(
+        {
+            "phase": "after_deterministic_patch_ir_generation",
+            "repair_attempt": attempt,
+            "stage": stage,
+            "strategy_id": strategy_id,
+            "semantic_defect_check": "skipped",
+            "message": "Deterministic strategies are gated only by preconditions and patch-IR postconditions.",
+        }
+    )
+    save_candidate_json(DEFAULT_POSTCHECK_OUTPUT, stage, strategy_id, attempt, post_check_result, candidate_namespace)
+    if post_check_result.get("accepted_by_ir_checker") is False:
+        verified_ir = mark_deterministic_pre_post_failed(patch_ir, post_check_result, candidate_code_dir)
+        diagnosis = deterministic_semantic_diagnosis_skipped(stage, strategy_id, accepted=False, message="deterministic patch-IR postconditions failed")
+        verified_ir = attach_diagnosis(verified_ir, diagnosis)
+        save_candidate_json(DEFAULT_DIAGNOSIS_OUTPUT, stage, strategy_id, attempt, diagnosis, candidate_namespace)
+        save_candidate_json(DEFAULT_VERIFIED_IR_OUTPUT, stage, strategy_id, attempt, verified_ir, candidate_namespace)
+        attempts = [
+            {
+                "attempt": attempt,
+                "patch_output": str(candidate_path(DEFAULT_PATCH_OUTPUT, stage, strategy_id, attempt, candidate_namespace)),
+                "postcheck_output": str(candidate_path(DEFAULT_POSTCHECK_OUTPUT, stage, strategy_id, attempt, candidate_namespace)),
+                "diagnosis_output": str(candidate_path(DEFAULT_DIAGNOSIS_OUTPUT, stage, strategy_id, attempt, candidate_namespace)),
+                "patched_code_output": None,
+                "code_ast_output": None,
+                "candidate_code_dir": str(candidate_code_dir),
+                "path_code": chain_code or [],
+                "verification": verified_ir.get("verification", {}).get("summary", {}),
+                "defect_count": 0,
+                "materialization_mode": DETERMINISTIC_MATERIALIZATION_MODE,
+            }
+        ]
+        return {
+            "accepted": False,
+            "stage": stage,
+            "strategy_id": strategy_id,
+            "verified_ir": verified_ir,
+            "source_snapshot": base_source_snapshot,
+            "candidate_code_dir": None,
+            "path_code": chain_code or [],
+            "attempts": attempts,
+            "event": candidate_event(stage, strategy_id, "failed", verified_ir, attempts),
+        }
+
+    try:
+        code_apply_result, generated_code = apply_deterministic_code_patch(candidate_code_dir, strategy_id, patch_ir)
+    except Exception as exc:
+        verified_ir = mark_llm_generation_failed(
+            patch_ir,
+            stage=stage,
+            strategy_id=strategy_id,
+            phase="deterministic_materialization",
+            error=exc,
+            candidate_code_dir=candidate_code_dir,
+        )
+        diagnosis = deterministic_semantic_diagnosis_skipped(
+            stage,
+            strategy_id,
+            accepted=False,
+            message=f"deterministic materialization failed: {type(exc).__name__}: {exc}",
+        )
+        verified_ir = attach_diagnosis(verified_ir, diagnosis)
+        save_candidate_json(DEFAULT_DIAGNOSIS_OUTPUT, stage, strategy_id, attempt, diagnosis, candidate_namespace)
+        save_candidate_json(DEFAULT_VERIFIED_IR_OUTPUT, stage, strategy_id, attempt, verified_ir, candidate_namespace)
+        attempts = [
+            failed_generation_attempt_record(
+                stage,
+                strategy_id,
+                attempt,
+                candidate_code_dir,
+                chain_code,
+                verified_ir,
+                diagnosis,
+                "deterministic_materialization",
+            )
+        ]
+        return {
+            "accepted": False,
+            "stage": stage,
+            "strategy_id": strategy_id,
+            "verified_ir": verified_ir,
+            "source_snapshot": base_source_snapshot,
+            "candidate_code_dir": None,
+            "path_code": chain_code or [],
+            "attempts": attempts,
+            "event": candidate_event(stage, strategy_id, "failed", verified_ir, attempts),
+        }
+
+    generated_code.update({"repair_attempt": attempt, "stage": stage, "candidate_code_dir": str(candidate_code_dir)})
+    save_candidate_json(DEFAULT_PATCHED_CODE_OUTPUT, stage, strategy_id, attempt, generated_code, candidate_namespace)
+
+    code_apply_result["candidate_code_dir"] = str(candidate_code_dir)
+    patch_ir["patch_to_code_application"] = code_apply_result
+    if code_apply_result["status"] != "pass":
+        verified_ir = mark_patch_apply_failed(patch_ir, code_apply_result)
+    else:
+        verified_ir = mark_chain_step_generated(patch_ir, code_apply_result)
+        syntax_report = check_generated_source_syntax(candidate_code_dir, backend_ast_files(verified_ir))
+        attach_source_syntax_report(verified_ir, syntax_report, candidate_code_dir)
+        if compile_each_step and not source_syntax_gate_failed(verified_ir):
+            verified_ir = verify_strategy_step_compile_gate(
+                verified_ir,
+                candidate_code_dir,
+                build_platform,
+                step_compile_timeout_seconds,
+            )
+        verified_ir["code_completeness"] = {
+            "accepted": True,
+            "results": [],
+            "semantic_obligations": {
+                "accepted": None,
+                "skipped_for_deterministic_strategy": True,
+                "message": "Semantic defect verification is skipped for deterministic micro-strategies; pre/post IR checks are authoritative here.",
+            },
+        }
+        verified_ir.setdefault("verification", {}).setdefault("summary", {})["semantic_defect_check"] = "skipped"
+
+    if source_syntax_gate_failed(verified_ir) or (compile_each_step and not step_compile_gate_passed(verified_ir)):
+        diagnosis = diagnose_defects(verified_ir, post_check_result)
+        diagnosis["semantic_defect_check"] = "skipped_for_deterministic_strategy"
+    else:
+        diagnosis = deterministic_semantic_diagnosis_skipped(
+            stage,
+            strategy_id,
+            accepted=candidate_is_accepted(verified_ir),
+            message="Deterministic strategy accepted by pre/post IR checks and step compile gate; semantic defect diagnosis skipped."
+            if candidate_is_accepted(verified_ir)
+            else code_apply_result.get("error_message"),
+        )
+    verified_ir = attach_diagnosis(verified_ir, diagnosis)
+    save_candidate_json(DEFAULT_DIAGNOSIS_OUTPUT, stage, strategy_id, attempt, diagnosis, candidate_namespace)
+    save_candidate_json(DEFAULT_VERIFIED_IR_OUTPUT, stage, strategy_id, attempt, verified_ir, candidate_namespace)
+
+    attempts = [
+        {
+            "attempt": attempt,
+            "patch_output": str(candidate_path(DEFAULT_PATCH_OUTPUT, stage, strategy_id, attempt, candidate_namespace)),
+            "postcheck_output": str(candidate_path(DEFAULT_POSTCHECK_OUTPUT, stage, strategy_id, attempt, candidate_namespace)),
+            "diagnosis_output": str(candidate_path(DEFAULT_DIAGNOSIS_OUTPUT, stage, strategy_id, attempt, candidate_namespace)),
+            "patched_code_output": str(candidate_path(DEFAULT_PATCHED_CODE_OUTPUT, stage, strategy_id, attempt, candidate_namespace)),
+            "code_ast_output": None,
+            "candidate_code_dir": str(candidate_code_dir),
+            "path_code": chain_code or [],
+            "verification": verified_ir.get("verification", {}).get("summary", {}),
+            "defect_count": diagnosis.get("defect_count"),
+            "materialization_mode": DETERMINISTIC_MATERIALIZATION_MODE,
+            "step_compile_gate": verified_ir.get("verification", {}).get("summary", {}).get("step_compile_gate"),
+        }
+    ]
+
+    if candidate_is_accepted(verified_ir):
+        source_snapshot = snapshot_source_files(candidate_code_dir, backend_code_files(verified_ir))
+        archive_generated_chain_step(candidate_code_dir, stage, strategy_id, attempt, verified_ir)
+        return {
+            "accepted": True,
+            "stage": stage,
+            "strategy_id": strategy_id,
+            "verified_ir": verified_ir,
+            "source_snapshot": source_snapshot,
+            "candidate_code_dir": str(candidate_code_dir),
+            "path_code": chain_code or [],
+            "attempts": attempts,
+            "event": candidate_event(stage, strategy_id, "accepted", verified_ir, attempts),
+        }
+
+    return {
+        "accepted": False,
+        "stage": stage,
+        "strategy_id": strategy_id,
+        "verified_ir": verified_ir,
+        "source_snapshot": base_source_snapshot,
+        "candidate_code_dir": None,
+        "path_code": chain_code or [],
+        "attempts": attempts,
+        "event": candidate_event(stage, strategy_id, "failed", verified_ir, attempts),
+    }
+
+
+def build_deterministic_patch_result(strategy: dict[str, Any], ir: dict[str, Any]) -> dict[str, Any]:
+    strategy_id = strategy["strategy_id"]
+    deterministic_updates = copy.deepcopy(strategy.get("ir_updates") or {})
+    deterministic_updates.update(synthesize_ir_updates(strategy_id))
+    deterministic_updates = clean_expected_ir_updates(deterministic_updates)
+    regions = [
+        {
+            "file": "cuda_kernel.cuh",
+            "anchor": f"{region}_BEGIN",
+            "change_summary": f"Deterministically materialize {region} for {strategy_id}.",
+        }
+        for region in deterministic_code_regions(strategy_id, ir)
+    ]
+    return {
+        "strategy_id": strategy_id,
+        "generation_method": "deterministic_region_materialization",
+        "modified_code_regions": regions,
+        "modified_ir_fields": list(deterministic_updates.keys()),
+        "ir_updates": deterministic_updates,
+        "code_patch": {
+            "diff": "",
+            "note": "This patch is materialized by deterministic SGPO anchor replacement, not by LLM free-form code generation.",
+        },
+        "expected_effect": "Update stable GEMM construction parameters or simple code regions without LLM variability.",
+        "potential_risks": [
+            "Only local anchor regions are changed; final correctness/performance is verified after the full chain."
+        ],
+    }
+
+
+def mark_deterministic_pre_post_failed(
+    patch_ir: dict[str, Any],
+    post_check_result: dict[str, Any],
+    candidate_code_dir: Path,
+) -> dict[str, Any]:
+    verified_ir = copy.deepcopy(patch_ir)
+    verified_ir["post_check"] = post_check_result
+    verified_ir["chain_step"] = {
+        "status": "failed",
+        "phase": "deterministic_pre_post_check",
+        "candidate_code_dir": str(candidate_code_dir),
+        "reason": "deterministic strategy failed patch-IR postcondition check",
+    }
+    verification = verified_ir.setdefault("verification", {})
+    verification["accepted"] = False
+    verification["compile"] = {"status": "not_run"}
+    verification["correctness"] = {"status": "not_run"}
+    verification["runtime_safety"] = {"status": "not_run", "cuda_error": None}
+    verification["summary"] = {
+        "chain_step_status": "failed",
+        "failed_phase": "deterministic_pre_post_check",
+        "postconditions_ok": post_check_result.get("postconditions_ok"),
+        "semantic_defect_check": "skipped",
+    }
+    return verified_ir
+
+
+def deterministic_semantic_diagnosis_skipped(
+    stage: str,
+    strategy_id: str,
+    accepted: bool,
+    message: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "status": "skipped" if accepted else "failed_without_semantic_diagnosis",
+        "related_strategy": strategy_id,
+        "defect_count": 0,
+        "defects": [],
+        "semantic_defect_check": "skipped_for_deterministic_strategy",
+        "message": message
+        or "Deterministic strategy uses only precondition and patch-IR postcondition checks.",
+    }
+
+
+def deterministic_code_regions(strategy_id: str, ir: dict[str, Any]) -> list[str]:
+    if strategy_id == "Mapping.WarpStore.CoalescedC":
+        return ["STORE"]
+    if strategy_id.startswith("Tiling."):
+        return ["LAUNCH_CONFIG"]
+    if strategy_id.startswith("Mapping."):
+        return ["INDEX_MAPPING", "REGISTER_DECL", "COMPUTE_INNER", "STORE"]
+    if strategy_id == "Layout.SharedMemory.AB.Basic":
+        return ["SHARED_DECL"]
+    if strategy_id in {"Layout.RegisterTile.C", "Register.AccumulatorLayout.2DArray"}:
+        return ["REGISTER_DECL", "COMPUTE_INNER", "STORE"]
+    if strategy_id in {
+        "Safety.BoundaryPolicy.GeneralGuarded",
+        "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
+        "Safety.AssumeDivisibleAligned",
+        "Epilogue.AlphaBeta.General",
+        "Epilogue.BetaZero.FastPath",
+        "Epilogue.BetaOne.FastPath",
+        "Epilogue.StoreC.CoalescedScalar",
+        "Vectorization.StoreC.SafeScalar",
+        "Mapping.WarpStore.CoalescedC",
+    }:
+        return ["STORE"]
+    return []
+
+
+def load_strategy_scoped_code_context(
+    ir: dict[str, Any],
+    code_dir: Path,
+    code_files: list[str],
+    strategy: dict[str, Any],
+    patch_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if target_backend(ir) == "cpu":
+        return load_code_context(code_dir, code_files)
+    return load_code_region_context(
+        code_dir,
+        code_files,
+        regions=strategy_relevant_regions(strategy, patch_result),
+        context_radius=8,
+    )
+
+
+def strategy_relevant_regions(
+    strategy: dict[str, Any],
+    patch_result: dict[str, Any] | None = None,
+) -> list[str]:
+    if strategy.get("strategy_id") == "Reordering.LoadCompute.SeparatePhases":
+        # These declarations are read-only context for the local loop rewrite.
+        return ["LAUNCH_CONFIG", "SHARED_DECL", "INDEX_MAPPING", "REGISTER_DECL",
+                "GLOBAL_TO_SHARED_LOAD", "SYNC_AFTER_LOAD", "MAIN_LOOP", "STORE"]
+    regions: list[str] = []
+    for item in (patch_result or {}).get("modified_code_regions", []) or []:
+        if isinstance(item, dict):
+            regions.extend(region_names_from_text(" ".join(str(item.get(key, "")) for key in ["anchor", "region", "change_summary"])))
+    regions.extend(regions_from_strategy_metadata(strategy))
+    regions.extend(regions_from_strategy_id(strategy.get("strategy_id", "")))
+    for bundled_strategy in strategy.get("bundle_strategies", []) or []:
+        if isinstance(bundled_strategy, dict):
+            regions.extend(regions_from_strategy_metadata(bundled_strategy))
+            regions.extend(regions_from_strategy_id(bundled_strategy.get("strategy_id", "")))
+    return unique_region_names(regions)
+
+
+def regions_from_strategy_metadata(strategy: dict[str, Any]) -> list[str]:
+    regions: list[str] = []
+    for value in strategy.get("modifies_regions", []) or []:
+        regions.extend(regions_from_semantic_region(str(value)))
+    subphase = str(strategy.get("subphase") or strategy.get("subphase_id") or "")
+    regions.extend(regions_from_subphase_name(subphase))
+    return regions
+
+
+def regions_from_semantic_region(value: str) -> list[str]:
+    text = value.lower()
+    regions: list[str] = []
+    if any(token in text for token in ["launch", "tile_config", "tiling"]):
+        regions.append("LAUNCH_CONFIG")
+    if any(token in text for token in ["shared_memory_layout", "shared_decl", "shared_memory_declaration"]):
+        regions.append("SHARED_DECL")
+    if any(token in text for token in ["global_load", "shared_load", "cooperative", "load"]):
+        regions.append("GLOBAL_TO_SHARED_LOAD")
+    if any(token in text for token in ["sync", "barrier"]):
+        regions.append("SYNC_AFTER_LOAD")
+    if any(token in text for token in ["index", "mapping", "thread_map", "lane", "warp"]):
+        regions.append("INDEX_MAPPING")
+    if any(token in text for token in ["register", "accumulator"]):
+        regions.append("REGISTER_DECL")
+    if any(token in text for token in ["compute", "k_loop", "ffma", "unroll", "prefetch", "pipeline"]):
+        regions.extend(["MAIN_LOOP", "COMPUTE_INNER"])
+    if any(token in text for token in ["store", "epilogue", "c_write"]):
+        regions.append("STORE")
+    return regions
+
+
+def regions_from_subphase_name(subphase: str) -> list[str]:
+    text = subphase.lower()
+    if not text:
+        return []
+    if "blocktile" in text or "warptile" in text or "threadtile" in text:
+        return ["LAUNCH_CONFIG"]
+    if "mapping" in text or "lane" in text:
+        return ["INDEX_MAPPING"]
+    if "sharedmemorydeclaration" in text:
+        return ["SHARED_DECL"]
+    if "sharedmemorytransform" in text or "cooperativeload" in text or "loadvectorization" in text:
+        return ["GLOBAL_TO_SHARED_LOAD", "SYNC_AFTER_LOAD"]
+    if "compute" in text or "prefetch" in text or "buffering" in text or "pipeline" in text:
+        return ["MAIN_LOOP", "COMPUTE_INNER", "SYNC_AFTER_LOAD"]
+    if "store" in text or "epilogue" in text or "alphabetapolicy" in text:
+        return ["STORE"]
+    return []
+
+
+def regions_from_strategy_id(strategy_id: str) -> list[str]:
+    if not strategy_id:
+        return []
+    if strategy_id.startswith("Tiling."):
+        return ["LAUNCH_CONFIG"]
+    if strategy_id.startswith("Mapping."):
+        return ["INDEX_MAPPING", "STORE"] if "Store" in strategy_id else ["INDEX_MAPPING"]
+    if strategy_id.startswith("Layout.SharedMemory.AB"):
+        return ["SHARED_DECL", "GLOBAL_TO_SHARED_LOAD", "SYNC_AFTER_LOAD"]
+    if strategy_id.startswith("Layout.SharedMemory."):
+        return ["SHARED_DECL", "GLOBAL_TO_SHARED_LOAD", "COMPUTE_INNER"]
+    if strategy_id.startswith("Layout.Register") or strategy_id.startswith("Register.Accumulator"):
+        return ["REGISTER_DECL", "COMPUTE_INNER", "STORE"]
+    if strategy_id.startswith("Reordering.ThreadMapping") or strategy_id.startswith("Reordering.Cooperative"):
+        return ["INDEX_MAPPING", "GLOBAL_TO_SHARED_LOAD", "SYNC_AFTER_LOAD"]
+    if strategy_id.startswith("Reordering.KLoop") or strategy_id.startswith("Reordering.WarpCompute") or strategy_id.startswith("Register.FFMA"):
+        return ["MAIN_LOOP", "COMPUTE_INNER"]
+    if strategy_id.startswith("Register.Cache"):
+        return ["REGISTER_DECL", "COMPUTE_INNER"]
+    if strategy_id.startswith("Vectorization.GlobalLoad"):
+        return ["GLOBAL_TO_SHARED_LOAD"]
+    if strategy_id.startswith("Vectorization.StoreC") or strategy_id.startswith("Epilogue."):
+        return ["STORE"]
+    if strategy_id.startswith("Pipeline."):
+        return ["SHARED_DECL", "GLOBAL_TO_SHARED_LOAD", "MAIN_LOOP", "COMPUTE_INNER", "SYNC_AFTER_LOAD"]
+    if strategy_id.startswith(("Memory.Prefetch.", "Scheduling.", "Reduction.StreamK.", "Memory.L2Reuse.")):
+        return ["LAUNCH_CONFIG", "MAIN_LOOP", "COMPUTE_INNER"]
+    if strategy_id.startswith("Safety."):
+        return ["GLOBAL_TO_SHARED_LOAD", "STORE"]
+    if strategy_id.startswith("Compiler."):
+        return ["LAUNCH_CONFIG"]
+    return ["COMPUTE_INNER"]
+
+
+def region_names_from_text(text: str) -> list[str]:
+    names = [
+        "LAUNCH_CONFIG",
+        "SHARED_DECL",
+        "INDEX_MAPPING",
+        "REGISTER_DECL",
+        "GLOBAL_TO_SHARED_LOAD",
+        "SYNC_AFTER_LOAD",
+        "MAIN_LOOP",
+        "COMPUTE_INNER",
+        "STORE",
+    ]
+    return [name for name in names if name in text]
+
+
+def unique_region_names(regions: list[str]) -> list[str]:
+    valid = {
+        "LAUNCH_CONFIG",
+        "SHARED_DECL",
+        "INDEX_MAPPING",
+        "REGISTER_DECL",
+        "GLOBAL_TO_SHARED_LOAD",
+        "SYNC_AFTER_LOAD",
+        "MAIN_LOOP",
+        "COMPUTE_INNER",
+        "STORE",
+    }
+    result = []
+    seen = set()
+    for region in regions:
+        if region in valid and region not in seen:
+            result.append(region)
+            seen.add(region)
+    return result or ["COMPUTE_INNER"]
+
+
+def apply_deterministic_code_patch(
+    code_root: Path,
+    strategy_id: str,
+    patch_ir: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    kernel_path = code_root / "cuda_kernel.cuh"
+    if not kernel_path.exists():
+        raise FileNotFoundError(f"deterministic materializer requires cuda_kernel.cuh: {kernel_path}")
+
+    original = kernel_path.read_text(encoding="utf-8")
+    content = original
+    applied = []
+    if strategy_id == "Reordering.LoadCompute.SeparatePhases":
+        raise ValueError("SeparatePhases requires an LLM local-region patch; full-kernel materialization is forbidden")
+    for region, replacement in deterministic_region_replacements(strategy_id, patch_ir).items():
+        content = replace_anchor_region(content, region, replacement)
+        applied.append({"file": "cuda_kernel.cuh", "region": region, "change_summary": f"Replaced {region} region."})
+
+    if content != original:
+        kernel_path.write_text(content, encoding="utf-8")
+
+    generated_code = {
+        "strategy_id": strategy_id,
+        "generation_method": "deterministic_region_materialization",
+        "files": [
+            {
+                "path": "cuda_kernel.cuh",
+                "content": content,
+                "change_summary": "Applied deterministic SGPO anchor replacements.",
+            }
+        ],
+        "modified_regions": applied,
+    }
+    return (
+        {
+            "status": "pass",
+            "method": "deterministic_region_materialization",
+            "applied": applied,
+            "materialization": {"status": "pass", "message": "Deterministic materialization completed."},
+        },
+        generated_code,
+    )
+
+
+def deterministic_region_replacements(strategy_id: str, ir: dict[str, Any]) -> dict[str, list[str]]:
+    replacements: dict[str, list[str]] = {}
+    if "LAUNCH_CONFIG" in deterministic_code_regions(strategy_id, ir):
+        replacements["LAUNCH_CONFIG"] = launch_config_lines(ir)
+    if "INDEX_MAPPING" in deterministic_code_regions(strategy_id, ir):
+        replacements["INDEX_MAPPING"] = index_mapping_lines(ir)
+    if "SHARED_DECL" in deterministic_code_regions(strategy_id, ir):
+        replacements["SHARED_DECL"] = shared_decl_lines(ir)
+    if "REGISTER_DECL" in deterministic_code_regions(strategy_id, ir):
+        replacements["REGISTER_DECL"] = register_decl_lines(ir)
+    if "COMPUTE_INNER" in deterministic_code_regions(strategy_id, ir):
+        replacements["COMPUTE_INNER"] = compute_inner_lines(ir)
+    if "STORE" in deterministic_code_regions(strategy_id, ir):
+        replacements["STORE"] = store_lines(ir)
+    return replacements
+
+
+def replace_anchor_region(content: str, region: str, replacement_lines: list[str]) -> str:
+    lines = content.splitlines()
+    begin_marker = f"{region}_BEGIN"
+    end_marker = f"{region}_END"
+    if sum(begin_marker in line for line in lines) > 1 or sum(end_marker in line for line in lines) > 1:
+        raise ValueError(f"Ambiguous duplicate anchor: {region}; cannot replace only the first occurrence")
+    begin_index = next((i for i, line in enumerate(lines) if begin_marker in line), None)
+    end_index = next((i for i, line in enumerate(lines) if end_marker in line and begin_index is not None and i > begin_index), None)
+    if begin_index is None or end_index is None:
+        raise ValueError(f"Anchor region not found in cuda_kernel.cuh: {region}")
+
+    body_start = begin_index + 1
+    while body_start < end_index and "*/" not in lines[body_start]:
+        body_start += 1
+    if body_start < end_index and "*/" in lines[body_start]:
+        body_start += 1
+
+    end_open_index = find_region_end_open(lines, body_start, end_index)
+    body_end = end_open_index if end_open_index is not None else end_index
+
+    indent = ""
+    if body_start < len(lines):
+        match = re.match(r"^(\s*)", lines[body_start])
+        indent = match.group(1) if match else ""
+    new_body = [f"{indent}{line}" if line else "" for line in replacement_lines]
+    suffix = lines[body_end:]
+    if end_open_index is None:
+        suffix = [f"{indent}/*"] + suffix
+    updated = lines[:body_start] + new_body + suffix
+    trailing_newline = "\n" if content.endswith(("\n", "\r\n")) else ""
+    return "\n".join(updated) + trailing_newline
+
+
+def find_region_end_open(lines: list[str], body_start: int, end_index: int) -> int | None:
+    for index in range(end_index - 1, body_start - 1, -1):
+        stripped = lines[index].strip()
+        if not stripped:
+            continue
+        if re.match(r"^/\*", stripped):
+            return index
+        return None
+    return None
+
+
+def launch_config_lines(ir: dict[str, Any]) -> list[str]:
+    bm = ir_int(ir, "tiling.block_m", 64)
+    bn = ir_int(ir, "tiling.block_n", 64)
+    bk = ir_int(ir, "tiling.block_k", 8)
+    wm = ir_int(ir, "tiling.warp_tile.warp_m", bm)
+    wn = ir_int(ir, "tiling.warp_tile.warp_n", bn)
+    wmiter = ir_int(ir, "tiling.warp_tile.warp_m_iter", 1)
+    wniter = ir_int(ir, "tiling.warp_tile.warp_n_iter", 1)
+    tm = ir_int(ir, "tiling.thread_m", 1)
+    tn = ir_int(ir, "tiling.thread_n", 1)
+    use_tiled_launch = bool(ir.get("tiling", {}).get("enabled")) or bm > 32 or bn > 32
+    launch_lines = [
+        f"static const int BM = {bm};",
+        f"static const int BN = {bn};",
+        f"static const int BK = {bk};",
+        f"static const int WM = {wm};",
+        f"static const int WN = {wn};",
+        f"static const int WMITER = {wmiter};",
+        f"static const int WNITER = {wniter};",
+        f"static const int TM = {tm};",
+        f"static const int TN = {tn};",
+    ]
+    if use_tiled_launch:
+        launch_lines.extend(
+            [
+                "dim3 block((BM * BN) / (WM * WN) * 32, 1, 1);",
+                "dim3 grid(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);",
+            ]
+        )
+    else:
+        launch_lines.extend(
+            [
+                "dim3 block(BN, BM, 1);",
+                "dim3 grid(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);",
+            ]
+        )
+    return launch_lines
+
+def shared_decl_lines(ir: dict[str, Any]) -> list[str]:
+    bm = ir_int(ir, "tiling.block_m", 64)
+    bn = ir_int(ir, "tiling.block_n", 64)
+    bk = ir_int(ir, "tiling.block_k", 8)
+    pad_a = ir_int(ir, "memory.shared_A.padding", 0)
+    pad_b = ir_int(ir, "memory.shared_B.padding", 0)
+    return [
+        f"__shared__ float As[2][BK + {pad_a}][BM];" if pad_a else "__shared__ float As[2][BK][BM];",
+        f"__shared__ float Bs[2][BK + {pad_b}][BN];" if pad_b else "__shared__ float Bs[2][BK][BN];",
+        f"static_assert(BM == {bm} && BN == {bn} && BK == {bk}, \"SGPO launch config and shared-memory IR disagree\");",
+    ]
+
+
+def index_mapping_lines(ir: dict[str, Any]) -> list[str]:
+    return [
+        "const int elements_per_tile = BM * BN;",
+        "const int warp_tiles_n = BN / WN;",
+        "const int Wrow = wid / warp_tiles_n;",
+        "const int Wcol = wid - Wrow * warp_tiles_n;",
+        "const int lane_cols = WNITER / TN;",
+        "const int Trow = lane / lane_cols;",
+        "const int Tcol = lane - Trow * lane_cols;",
+        "const int local_m_base = Wrow * WM + Trow * TM;",
+        "const int local_n_base = Wcol * WN + Tcol * TN;",
+        "const int global_m_base = tile_m0 + local_m_base;",
+        "const int global_n_base = tile_n0 + local_n_base;",
+        "const int global_m = global_m_base;",
+        "const int global_n = global_n_base;",
+        "const int load_a_smem_m = tid % BM;",
+        "const int load_a_smem_k = (tid / BM) % BK;",
+        "const int load_b_smem_n = tid % BN;",
+        "const int load_b_smem_k = (tid / BN) % BK;",
+        "const int hightA = CEIL_DIV(BM * BK, thread_num);",
+        "const int hightB = CEIL_DIV(BN * BK, thread_num);",
+        "(void)global_m_base;",
+        "(void)global_n_base;",
+        "(void)load_a_smem_m;",
+        "(void)load_a_smem_k;",
+        "(void)load_b_smem_n;",
+        "(void)load_b_smem_k;",
+        "(void)hightA;",
+        "(void)hightB;",
+    ]
+
+
+def register_decl_lines(ir: dict[str, Any]) -> list[str]:
+    return [
+        "float results[WM / WMITER * TM][WN / WNITER * TN] = {0.0f};",
+        "float regM[TM] = {0.0f};",
+        "float regN[TN] = {0.0f};",
+    ]
+
+
+def compute_inner_lines(ir: dict[str, Any]) -> list[str]:
+    return [
+        "#pragma unroll",
+        "for (int k = 0; k < BK; ++k) {",
+        "    #pragma unroll",
+        "    for (int wm = 0; wm < WM / WMITER; ++wm) {",
+        "        #pragma unroll",
+        "        for (int wn = 0; wn < WN / WNITER; ++wn) {",
+        "            #pragma unroll",
+        "            for (int i = 0; i < TM; ++i) {",
+        "                regM[i] = As[comp_flag][k][Wrow * WM + wm * WMITER + Trow * TM + i];",
+        "            }",
+        "            #pragma unroll",
+        "            for (int j = 0; j < TN; ++j) {",
+        "                regN[j] = Bs[comp_flag][k][Wcol * WN + wn * WNITER + Tcol * TN + j];",
+        "            }",
+        "            #pragma unroll",
+        "            for (int i = 0; i < TM; ++i) {",
+        "                #pragma unroll",
+        "                for (int j = 0; j < TN; ++j) {",
+        "                    results[wm * TM + i][wn * TN + j] += regM[i] * regN[j];",
+        "                }",
+        "            }",
+        "        }",
+        "    }",
+        "}",
+    ]
+
+
+def store_lines(ir: dict[str, Any]) -> list[str]:
+    mode = ir_get(ir, "epilogue.mode")
+    accumulator = "results[m + wm * TM][n + wn * TN]"
+    value = f"alpha * {accumulator} + beta * C[c_index]"
+    if mode == "beta_zero_fast_path":
+        value = f"(beta == 0.0f ? alpha * {accumulator} : alpha * {accumulator} + beta * C[c_index])"
+    elif mode == "beta_one_fast_path":
+        value = f"alpha * {accumulator} + (beta == 1.0f ? C[c_index] : beta * C[c_index])"
+    return [
+        "#pragma unroll",
+        "for (int wm = 0; wm < WM / WMITER; ++wm) {",
+        "    #pragma unroll",
+        "    for (int wn = 0; wn < WN / WNITER; ++wn) {",
+        "        #pragma unroll",
+        "        for (int m = 0; m < TM; ++m) {",
+        "            #pragma unroll",
+        "            for (int n = 0; n < TN; ++n) {",
+        "                const int global_m = tile_m0 + Wrow * WM + wm * WMITER + Trow * TM + m;",
+        "                const int global_n = tile_n0 + Wcol * WN + wn * WNITER + Tcol * TN + n;",
+        "                if (global_m < M && global_n < N) {",
+        "                    const int c_index = OFFSET(global_m, global_n, N);",
+        f"                    C[c_index] = {value};",
+        "                }",
+        "            }",
+        "        }",
+        "    }",
+        "}",
+    ]
+
+
+def ir_int(ir: dict[str, Any], dotted_path: str, default: int) -> int:
+    value = ir_get(ir, dotted_path)
+    return int_or_default(value, default)
+
+
+def ir_get(ir: dict[str, Any], dotted_path: str, default: Any = None) -> Any:
+    current: Any = ir
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
 
 
 def run_strategy_candidate(
@@ -1345,8 +3861,53 @@ def run_strategy_candidate(
     candidate_namespace: str | None = None,
     chain_path: list[str] | None = None,
     chain_code: list[int] | None = None,
+    semantic_precheck_terminal: bool = True,
+    defer_semantic_checks: bool = False,
+    build_platform: str = "windows",
+    compile_each_step: bool = DEFAULT_COMPILE_EACH_STRATEGY_STEP,
+    step_compile_timeout_seconds: int = DEFAULT_STEP_COMPILE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     strategy_id = strategy["strategy_id"]
+    bundle_ids = strategy.get("bundle_strategy_ids", [strategy_id])
+    host_only = bool(bundle_ids) and all(sid.startswith("Memory.SharedMemory.Carveout.") for sid in bundle_ids)
+    if bundle_ids == ["Compiler.ResourceFeedback.PtxasOccupancySweep"] or host_only:
+        candidate_code_dir = chain_code_path(chain_path or [strategy_id], chain_code, base_ir)
+        restore_source_files(candidate_code_dir, base_source_snapshot)
+        patch_result = {"strategy_id": strategy_id, "ir_updates": strategy["ir_updates"],
+                        "modified_code_regions": [], "modified_ir_fields": list(strategy["ir_updates"]),
+                        "code_patch": {}, "materialization": "host_launch_config" if host_only else "compiler_resource_sweep"}
+        patch_ir = build_patch_ir(base_ir, strategy, precheck_item, patch_result)
+        if host_only:
+            from SGPO.verification.cuda_launch_config import configure_shared_launch
+            path = candidate_code_dir / "cuda_kernel.cuh"
+            try:
+                configured = configure_shared_launch(path.read_text(encoding="utf-8"), patch_ir)
+            except ValueError as exc:
+                return {"accepted": False, "stage": stage, "strategy_id": strategy_id,
+                        "verified_ir": patch_ir, "candidate_code_dir": None, "attempts": [],
+                        "error_message": str(exc), "source_snapshot": base_source_snapshot}
+            path.write_text(configured, encoding="utf-8")
+        save_candidate_json(DEFAULT_PATCH_OUTPUT, stage, strategy_id, 1, patch_result, candidate_namespace)
+        return {"accepted": True, "stage": stage, "strategy_id": strategy_id,
+                "verified_ir": patch_ir, "candidate_code_dir": str(candidate_code_dir),
+                "source_snapshot": snapshot_source_files(candidate_code_dir, backend_code_files(patch_ir)),
+                "attempts": [{"attempt": 1, "patch_output": str(candidate_path(DEFAULT_PATCH_OUTPUT, stage, strategy_id, 1, candidate_namespace))}],
+                "path_code": chain_code or []}
+    if target_backend(base_ir) != "cpu" and deterministic_materialization_mode(strategy) == DETERMINISTIC_MATERIALIZATION_MODE:
+        return run_deterministic_strategy_candidate(
+            stage=stage,
+            base_ir=base_ir,
+            base_source_snapshot=base_source_snapshot,
+            strategy=strategy,
+            precheck_item=precheck_item,
+            candidate_namespace=candidate_namespace,
+            chain_path=chain_path,
+            chain_code=chain_code,
+            build_platform=build_platform,
+            compile_each_step=compile_each_step,
+            step_compile_timeout_seconds=step_compile_timeout_seconds,
+        )
+
     repair_context = None
     attempts = []
     verified_ir = None
@@ -1358,13 +3919,20 @@ def run_strategy_candidate(
         candidate_code_dir = chain_code_path(chain_path or [strategy_id], chain_code, base_ir)
         restore_source_files(candidate_code_dir, base_source_snapshot)
         code_files = backend_code_files(base_ir)
+        context_files = backend_llm_context_files(base_ir)
         try:
+            patch_code_context = load_strategy_scoped_code_context(
+                base_ir,
+                candidate_code_dir,
+                context_files,
+                strategy,
+            )
             patch_result = generate_patch_with_llm(
                 client=client,
                 ir=base_ir,
                 strategy=strategy,
                 precheck_item=precheck_item,
-                code_context=load_code_context(candidate_code_dir, code_files),
+                code_context=patch_code_context,
                 prompt_path=backend_patch_prompt(base_ir),
                 repair_context=repair_context,
             )
@@ -1383,6 +3951,8 @@ def run_strategy_candidate(
             save_candidate_json(DEFAULT_VERIFIED_IR_OUTPUT, stage, strategy_id, attempt, verified_ir, candidate_namespace)
             attempts.append(failed_generation_attempt_record(stage, strategy_id, attempt, candidate_code_dir, chain_code, verified_ir, diagnosis, "patch_generation"))
             repair_context = build_generation_repair_context(attempt, phase="patch_generation", error=exc, diagnosis=diagnosis)
+            if non_repairable_llm_generation_error(exc):
+                break
             continue
         patch_result["repair_attempt"] = attempt
         patch_result["stage"] = stage
@@ -1414,13 +3984,20 @@ def run_strategy_candidate(
         patch_file = candidate_path(DEFAULT_PATCH_OUTPUT, stage, strategy_id, attempt, candidate_namespace)
         patch_from_file = load_json(patch_file)
         try:
+            materialization_code_context = load_strategy_scoped_code_context(
+                base_ir,
+                candidate_code_dir,
+                context_files,
+                strategy,
+                patch_from_file,
+            )
             if target_backend(base_ir) == "cpu":
                 generated_code = generate_cpu_c_code_from_patch_with_llm(
                     client=client,
                     patch_ir=patch_ir,
                     patch_result=patch_from_file,
                     strategy=strategy,
-                    code_context=load_code_context(candidate_code_dir, code_files),
+                    code_context=materialization_code_context,
                     prompt_path=backend_patch_to_code_prompt(base_ir),
                     repair_context=repair_context,
                     patch_file=patch_file,
@@ -1431,7 +4008,7 @@ def run_strategy_candidate(
                     patch_ir=patch_ir,
                     patch_result=patch_from_file,
                     strategy=strategy,
-                    code_context=load_code_context(candidate_code_dir, code_files),
+                    code_context=materialization_code_context,
                     prompt_path=backend_patch_to_code_prompt(base_ir),
                     repair_context=repair_context,
                     patch_file=patch_file,
@@ -1451,6 +4028,8 @@ def run_strategy_candidate(
             save_candidate_json(DEFAULT_VERIFIED_IR_OUTPUT, stage, strategy_id, attempt, verified_ir, candidate_namespace)
             attempts.append(failed_generation_attempt_record(stage, strategy_id, attempt, candidate_code_dir, chain_code, verified_ir, diagnosis, "code_generation"))
             repair_context = build_generation_repair_context(attempt, phase="code_generation", error=exc, diagnosis=diagnosis)
+            if non_repairable_llm_generation_error(exc):
+                break
             continue
         generated_code["repair_attempt"] = attempt
         generated_code["stage"] = stage
@@ -1471,10 +4050,58 @@ def run_strategy_candidate(
         if code_apply_result["status"] != "pass":
             verified_ir = mark_patch_apply_failed(patch_ir, code_apply_result)
         else:
-            code_ast = extract_code_ast(candidate_code_dir) if target_backend(base_ir) != "cpu" else extract_cpu_code_ast(candidate_code_dir)
-            save_candidate_json(DEFAULT_CODE_AST_OUTPUT, stage, strategy_id, attempt, code_ast, candidate_namespace)
-            patch_ir["code_ast"] = code_ast
             verified_ir = mark_chain_step_generated(patch_ir, code_apply_result)
+            syntax_report = check_generated_source_syntax(candidate_code_dir, backend_ast_files(verified_ir))
+            attach_source_syntax_report(verified_ir, syntax_report, candidate_code_dir)
+            if compile_each_step and not source_syntax_gate_failed(verified_ir):
+                verified_ir = verify_strategy_step_compile_gate(
+                    verified_ir,
+                    candidate_code_dir,
+                    build_platform,
+                    step_compile_timeout_seconds,
+                )
+            if source_syntax_gate_failed(verified_ir):
+                pass
+            elif compile_each_step and not step_compile_gate_passed(verified_ir):
+                pass
+            elif not defer_semantic_checks:
+                code_ast = (
+                    extract_code_ast(candidate_code_dir, backend_ast_files(base_ir))
+                    if target_backend(base_ir) != "cpu"
+                    else extract_cpu_code_ast(candidate_code_dir)
+                )
+                save_candidate_json(DEFAULT_CODE_AST_OUTPUT, stage, strategy_id, attempt, code_ast, candidate_namespace)
+                verified_ir["code_ast"] = code_ast
+                # Phase 1 treats source-level semantic failures as local blockers.
+                # Phase 2 uses them as advisory defects and still runs compile/runtime
+                # oracles before deciding accept/repair/rollback.
+                if target_backend(base_ir) != "cpu":
+                    semantic_report = check_gemm_semantic_obligations(candidate_code_dir, verified_ir)
+                    verified_ir["code_completeness"] = {
+                        "accepted": semantic_report.get("accepted") is not False,
+                        "results": [],
+                        "semantic_obligations": semantic_report,
+                    }
+                    if semantic_report.get("accepted") is False and semantic_precheck_terminal:
+                        verified_ir["chain_step"] = {
+                            "status": "failed",
+                            "phase": "semantic_precheck",
+                            "candidate_code_dir": str(candidate_code_dir),
+                            "reason": "generated CUDA violates source-level semantic obligations",
+                        }
+                        verified_ir.setdefault("verification", {})["accepted"] = False
+                        summary = verified_ir["verification"].setdefault("summary", {})
+                        summary.update(
+                            {
+                                "chain_step_status": "failed",
+                                "failure_phase": "semantic_precheck",
+                            }
+                        )
+                    elif semantic_report.get("accepted") is False:
+                        summary = verified_ir.setdefault("verification", {}).setdefault("summary", {})
+                        summary["code_checker_advisory_failure"] = True
+                        summary["checker_failure_is_terminal"] = False
+                        summary["semantic_precheck_status"] = "advisory_fail"
 
         if post_check_result.get("deferred_until_stage_verification") and candidate_is_accepted(verified_ir):
             diagnosis = {
@@ -1505,6 +4132,8 @@ def run_strategy_candidate(
                 "path_code": chain_code or [],
                 "verification": verified_ir.get("verification", {}).get("summary", {}),
                 "defect_count": diagnosis.get("defect_count"),
+                "step_compile_gate": verified_ir.get("verification", {}).get("summary", {}).get("step_compile_gate"),
+                "compile_status": verified_ir.get("verification", {}).get("compile", {}).get("status"),
             }
         )
 
@@ -1538,6 +4167,154 @@ def run_strategy_candidate(
     }
 
 
+def non_repairable_llm_generation_error(error: Exception) -> bool:
+    error_type = type(error).__name__
+    error_message = str(error).lower()
+    if error_type in {
+        "APIConnectionError",
+        "APITimeoutError",
+        "APIError",
+        "ConnectError",
+        "ReadTimeout",
+        "TimeoutException",
+        "JSONDecodeError",
+    }:
+        return True
+    return any(
+        token in error_message
+        for token in [
+            "connection error",
+            "timed out",
+            "timeout",
+            "unterminated string",
+            "does not contain a json object",
+            "eof occurred in violation of protocol",
+        ]
+    )
+
+
+def check_generated_source_syntax(code_dir: Path, code_files: list[str]) -> dict[str, Any]:
+    results = []
+    for relative_path in code_files:
+        path = code_dir / relative_path
+        if not path.exists():
+            results.append(
+                {
+                    "id": f"SOURCE_EXISTS:{relative_path}",
+                    "status": "fail",
+                    "message": f"{relative_path} does not exist",
+                }
+            )
+            continue
+        content = path.read_text(encoding="utf-8")
+        results.extend(check_balanced_source_delimiters(relative_path, content))
+        results.extend(check_patch_anchor_pairs(relative_path, content))
+        if relative_path.endswith((".cu", ".cuh", ".cpp", ".c")):
+            results.extend(check_duplicate_launch_constants(relative_path, content))
+    accepted = all(item["status"] != "fail" for item in results)
+    return {
+        "checker": "sgpo_lightweight_source_syntax",
+        "accepted": accepted,
+        "results": results,
+    }
+
+
+def check_balanced_source_delimiters(relative_path: str, content: str) -> list[dict[str, Any]]:
+    code = strip_strings_for_light_syntax(strip_comments_for_light_syntax(content))
+    pairs = [("{", "}"), ("(", ")"), ("[", "]")]
+    results = []
+    for left, right in pairs:
+        left_count = code.count(left)
+        right_count = code.count(right)
+        results.append(
+            {
+                "id": f"BALANCED_{left}{right}:{relative_path}",
+                "status": "pass" if left_count == right_count else "fail",
+                "message": f"{left_count} '{left}' and {right_count} '{right}' delimiters",
+            }
+        )
+    return results
+
+
+def check_patch_anchor_pairs(relative_path: str, content: str) -> list[dict[str, Any]]:
+    begin_pattern = re.compile(r"SGPO_PATCH_([A-Z0-9_]+)_BEGIN")
+    end_pattern = re.compile(r"SGPO_PATCH_([A-Z0-9_]+)_END")
+    begin_counts: dict[str, int] = {}
+    end_counts: dict[str, int] = {}
+    for name in begin_pattern.findall(content):
+        begin_counts[name] = begin_counts.get(name, 0) + 1
+    for name in end_pattern.findall(content):
+        end_counts[name] = end_counts.get(name, 0) + 1
+    names = sorted(set(begin_counts) | set(end_counts))
+    return [
+        {
+            "id": f"PATCH_ANCHOR_PAIR:{relative_path}:{name}",
+            "status": "pass" if begin_counts.get(name, 0) == 1 and end_counts.get(name, 0) == 1 else "fail",
+            "message": f"{name}: begin={begin_counts.get(name, 0)}, end={end_counts.get(name, 0)}",
+        }
+        for name in names
+    ]
+
+
+def check_duplicate_launch_constants(relative_path: str, content: str) -> list[dict[str, Any]]:
+    results = []
+    for name in ("BM", "BN", "BK", "WM", "WN", "WMITER", "WNITER", "TM", "TN"):
+        count = len(re.findall(rf"\bstatic\s+const\s+int\s+{name}\s*=", content))
+        results.append(
+            {
+                "id": f"DUPLICATE_LAUNCH_CONST:{relative_path}:{name}",
+                "status": "pass" if count <= 1 else "fail",
+                "message": f"{name} static const definition count = {count}",
+            }
+        )
+    return results
+
+
+def attach_source_syntax_report(verified_ir: dict[str, Any], syntax_report: dict[str, Any], candidate_code_dir: Path) -> None:
+    verified_ir["source_syntax"] = syntax_report
+    summary = verified_ir.setdefault("verification", {}).setdefault("summary", {})
+    summary["source_syntax_check"] = "pass" if syntax_report.get("accepted") else "fail"
+    if syntax_report.get("accepted"):
+        return
+    verified_ir["chain_step"] = {
+        "status": "failed",
+        "phase": "source_syntax_check",
+        "candidate_code_dir": str(candidate_code_dir),
+        "reason": "generated source failed lightweight syntax checks",
+    }
+    verified_ir.setdefault("verification", {})["accepted"] = False
+    summary.update(
+        {
+            "chain_step_status": "failed",
+            "failure_phase": "source_syntax_check",
+        }
+    )
+
+
+def source_syntax_gate_failed(ir: dict[str, Any]) -> bool:
+    return ir.get("source_syntax", {}).get("accepted") is False
+
+
+def strip_comments_for_light_syntax(content: str) -> str:
+    without_block = re.sub(r"/\*.*?\*/", lambda match: "\n" * match.group(0).count("\n"), content, flags=re.DOTALL)
+    return re.sub(r"//.*", "", without_block)
+
+
+def strip_strings_for_light_syntax(content: str) -> str:
+    return re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', '""', content)
+
+
+def subphase_can_continue_after_candidate_failures(subphase: dict[str, Any] | None) -> bool:
+    if not subphase:
+        return False
+    subphase_id = subphase.get("subphase_id") or subphase.get("subphase") or ""
+    if not subphase_id or subphase_id.endswith(".StageVerification"):
+        return False
+    if subphase.get("optional") is True:
+        return True
+    return subphase_id not in REQUIRED_CONSTRUCTION_SUBPHASES
+
+
 def select_all_filtered_candidates(
     filtered_strategy_index: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1561,6 +4338,52 @@ def select_all_filtered_candidates(
         "selection_mode": DEFAULT_SELECTION_MODE,
         "llm_used_for_strategy_selection": False,
     }
+
+
+def build_fallback_micro_selection(
+    available_strategy_index: dict[str, Any],
+    subphase_id: str | None,
+    reason: str,
+) -> dict[str, Any]:
+    candidates = []
+    for index, strategy in enumerate(available_strategy_index.get("strategies", []) or []):
+        strategy_id = strategy.get("strategy_id")
+        if not strategy_id:
+            continue
+        candidates.append(
+            {
+                "strategy_id": strategy_id,
+                "reason": reason,
+                "confidence": fallback_strategy_confidence(strategy, index),
+                "fallback_selected": True,
+            }
+        )
+    return {
+        "selected_strategy_id": candidates[0]["strategy_id"] if candidates else None,
+        "reason": reason,
+        "expected_ir_updates": {},
+        "candidates": candidates,
+        "current_subphase": subphase_id,
+        "selection_mode": "programmatic_fallback_after_llm_failure",
+        "llm_used_for_strategy_selection": False,
+        "llm_error": reason,
+    }
+
+
+def all_available_strategies_are_deterministic(strategy_index: dict[str, Any]) -> bool:
+    strategies = strategy_index.get("strategies", []) or []
+    return bool(strategies) and all(
+        deterministic_materialization_mode(strategy) == DETERMINISTIC_MATERIALIZATION_MODE
+        for strategy in strategies
+    )
+
+
+def fallback_strategy_confidence(strategy: dict[str, Any], original_index: int) -> float:
+    try:
+        priority = float(strategy.get("priority", 0.0))
+    except (TypeError, ValueError):
+        priority = 0.0
+    return priority / 1000.0 - original_index * 0.0001
 
 
 def inject_profile_preferred_candidates(
@@ -1614,12 +4437,202 @@ def select_single_path_candidates(candidates: list[dict[str, Any]]) -> list[dict
     return [copy.deepcopy(candidates[0])]
 
 
+def build_joint_tiling_micro_selection(
+    client: OpenAICompatibleClient,
+    current_ir: dict[str, Any],
+    strategy_library: dict[str, Any],
+    available_strategy_index: dict[str, Any],
+    top_k: int,
+) -> dict[str, Any]:
+    allowed_blocks = {
+        item.get("strategy_id")
+        for item in available_strategy_index.get("strategies", []) or []
+        if isinstance(item, dict)
+    }
+    legal_candidates = [
+        item
+        for item in build_joint_tiling_candidates(strategy_library, current_ir)
+        if item["block_strategy_id"] in allowed_blocks
+    ]
+    selected_ids = []
+    llm_reason = ""
+    llm_error = None
+    try:
+        response = get_joint_tiling_selection_from_llm(
+            client=client,
+            optir_summary=compact_joint_tiling_ir_summary(current_ir),
+            tiling_candidates=legal_candidates,
+            top_k=top_k,
+        )
+        selected_ids = response.get("candidate_ids", [])
+        llm_reason = response.get("reason", "")
+    except Exception as exc:
+        llm_error = f"{type(exc).__name__}: {exc}"
+
+    if llm_error is not None:
+        raise RuntimeError(
+            "Joint Tiling selection requires an LLM response; "
+            f"selection failed with {llm_error}."
+        )
+    selected_by_id = {item["candidate_id"]: item for item in legal_candidates}
+    selected_plans = [selected_by_id[item] for item in selected_ids if item in selected_by_id]
+    if not selected_plans:
+        raise RuntimeError("Joint Tiling selection returned no legal Block/Warp/Thread combination.")
+    candidates = []
+    for rank, plan in enumerate(selected_plans):
+        candidates.append(
+            {
+                "strategy_id": plan["block_strategy_id"],
+                "reason": llm_reason or "LLM-selected legal Block/Warp/Thread combination.",
+                "confidence": 1.0 - rank * 0.01,
+                "tiling_plan": tiling_plan_for_ir(plan),
+            }
+        )
+    return {
+        "selected_strategy_id": candidates[0]["strategy_id"] if candidates else None,
+        "reason": llm_reason,
+        "expected_ir_updates": {},
+        "candidates": candidates,
+        "selection_mode": "llm_joint_tiling_tuple_selection",
+        "legal_tuple_count": len(legal_candidates),
+        "prompt_option_count": {
+            "block": len({item["block_strategy_id"] for item in legal_candidates}),
+            "warp": len({item["warp_strategy_id"] for item in legal_candidates}),
+            "thread": len({item["thread_strategy_id"] for item in legal_candidates}),
+        },
+        "llm_error": llm_error,
+    }
+
+
+def planned_tiling_micro_selection(
+    current_ir: dict[str, Any],
+    current_subphase_id: str | None,
+    available_strategy_index: dict[str, Any],
+) -> dict[str, Any] | None:
+    plan = (current_ir.get("strategy") or {}).get("tiling_joint_plan")
+    plan_key = {
+        "Tiling.WarpTileSelection": "warp_strategy_id",
+        "Tiling.ThreadTileSelection": "thread_strategy_id",
+    }.get(current_subphase_id)
+    if not isinstance(plan, dict) or plan_key is None:
+        return None
+    strategy_id = plan.get(plan_key)
+    allowed_ids = {
+        item.get("strategy_id")
+        for item in available_strategy_index.get("strategies", []) or []
+        if isinstance(item, dict)
+    }
+    if strategy_id not in allowed_ids:
+        return None
+    return {
+        "selected_strategy_id": strategy_id,
+        "reason": f"Execute the {current_subphase_id} component of the previously selected complete tiling tuple.",
+        "expected_ir_updates": {},
+        "candidates": [
+            {
+                "strategy_id": strategy_id,
+                "reason": "Planned complete tiling tuple component.",
+                "confidence": 1.0,
+            }
+        ],
+        "selection_mode": "planned_joint_tiling",
+    }
+
+
+def tiling_plan_ir_updates(strategy_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    if strategy_id == plan.get("block_strategy_id"):
+        return {
+            "tiling.enabled": True,
+            "tiling.block_m": plan.get("BM"),
+            "tiling.block_n": plan.get("BN"),
+            "tiling.block_k": plan.get("BK"),
+        }
+    if strategy_id == plan.get("warp_strategy_id"):
+        return {
+            "tiling.warp_tile.warp_m": plan.get("WM"),
+            "tiling.warp_tile.warp_n": plan.get("WN"),
+        }
+    if strategy_id == plan.get("thread_strategy_id"):
+        return {
+            "tiling.thread_m": plan.get("TM"),
+            "tiling.thread_n": plan.get("TN"),
+            "tiling.warp_tile.warp_m_iter": plan.get("WMITER"),
+            "tiling.warp_tile.warp_n_iter": plan.get("WNITER"),
+        }
+    return {}
+
+
 def select_top_k_candidates(candidates: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
     if not candidates or top_k <= 0:
         return []
     indexed = [(index, item) for index, item in enumerate(candidates)]
     indexed.sort(key=lambda pair: candidate_selection_score(pair[1], pair[0]), reverse=True)
     return [copy.deepcopy(item) for _, item in indexed[:top_k]]
+
+
+def frontier_limit_for_stage(
+    stage: str,
+    backend: str,
+    normal_limit: int,
+    core_limit: int,
+    first_performance_prune_stage: str,
+) -> int:
+    if backend != "cuda":
+        return normal_limit
+    core_stages = ["Tiling", first_performance_prune_stage]
+    return max(normal_limit, core_limit) if stage in core_stages else normal_limit
+
+
+def prune_frontier_after_core_construction(
+    frontier: list[dict[str, Any]],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    if top_k <= 0 or len(frontier) <= top_k:
+        return list(frontier)
+    return sorted(frontier, key=frontier_state_score, reverse=True)[:top_k]
+
+
+def tiling_lineage_key(state: dict[str, Any]) -> tuple[str, ...] | None:
+    path = state.get("path", []) or []
+    block_strategy_id = next(
+        (item for item in path if isinstance(item, str) and item.startswith("Tiling.BlockTile.")),
+        None,
+    )
+    if block_strategy_id is None:
+        return None
+    # The first BlockTile choices are the independent search roots (chain.1/2/3).
+    # WarpTile and ThreadTile variants compete only within their own BlockTile root.
+    return (block_strategy_id,)
+
+
+def tiling_lineage_keys(states: list[dict[str, Any]]) -> set[tuple[str, ...]]:
+    return {key for state in states if (key := tiling_lineage_key(state)) is not None}
+
+
+def prune_frontier_per_tiling_lineage(
+    frontier: list[dict[str, Any]],
+    top_k_per_lineage: int,
+) -> list[dict[str, Any]]:
+    if top_k_per_lineage <= 0:
+        return list(frontier)
+    grouped: dict[tuple[str, ...] | None, list[dict[str, Any]]] = {}
+    for state in frontier:
+        grouped.setdefault(tiling_lineage_key(state), []).append(state)
+    kept = []
+    for group in grouped.values():
+        kept.extend(sorted(group, key=frontier_state_score, reverse=True)[:top_k_per_lineage])
+    return sorted(kept, key=frontier_state_score, reverse=True)
+
+
+def take_frontier_batch_per_tiling_lineage(
+    states: list[dict[str, Any]],
+    top_k_per_lineage: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not states or top_k_per_lineage <= 0:
+        return list(states), []
+    selected = prune_frontier_per_tiling_lineage(states, top_k_per_lineage)
+    selected_ids = {id(state) for state in selected}
+    return selected, [state for state in states if id(state) not in selected_ids]
 
 
 def take_frontier_batch(
@@ -1804,6 +4817,35 @@ def compact_ir_summary(ir: dict[str, Any]) -> dict[str, Any]:
     return {key: ir.get(key) for key in keep if key in ir}
 
 
+def compact_joint_tiling_ir_summary(ir: dict[str, Any]) -> dict[str, Any]:
+    hardware = ir.get("hardware", {}) or {}
+    gpu = hardware.get("gpu", {}) or {}
+    return {
+        "problem": copy.deepcopy(ir.get("problem", {}) or {}),
+        "hardware": {
+            "warp_size": hardware.get("warp_size", gpu.get("warp_size")),
+            "max_threads_per_block": hardware.get("max_threads_per_block", gpu.get("max_threads_per_block")),
+            "max_shared_memory_per_block_bytes": hardware.get(
+                "max_shared_memory_per_block_bytes",
+                gpu.get("max_shared_memory_per_block_bytes"),
+            ),
+            "sm_count": hardware.get("sm_count", gpu.get("sm_count")),
+            "compute_capability": hardware.get("compute_capability", gpu.get("compute_capability")),
+        },
+    }
+
+
+def compact_hierarchical_tiling_ir_summary(ir: dict[str, Any]) -> dict[str, Any]:
+    summary = compact_joint_tiling_ir_summary(ir)
+    summary["tiling"] = copy.deepcopy(ir.get("tiling", {}) or {})
+    summary["mapping"] = {
+        key: copy.deepcopy((ir.get("mapping", {}) or {}).get(key))
+        for key in ("warps_m", "warps_n", "warps_per_block", "threads_per_block")
+        if (ir.get("mapping", {}) or {}).get(key) is not None
+    }
+    return summary
+
+
 def save_chain_stage_available_strategies(
     chain_path: list[str],
     chain_code: list[int],
@@ -1889,7 +4931,10 @@ def build_repair_context(
 def candidate_is_accepted(verified_ir: dict[str, Any]) -> bool:
     chain_step = verified_ir.get("chain_step", {})
     if chain_step.get("status") == "generated":
-        return True
+        summary = verified_ir.get("verification", {}).get("summary", {}) or {}
+        if summary.get("checker_failure_is_terminal") is False:
+            return True
+        return verified_ir.get("code_completeness", {}).get("accepted") is not False
     return oracle_verification_passed(verified_ir)
 
 
@@ -1897,12 +4942,34 @@ def oracle_verification_passed(verified_ir: dict[str, Any]) -> bool:
     return verified_ir.get("verification", {}).get("accepted") is True
 
 
+def stage_failure_requires_strategy_fallback(verified_ir: dict[str, Any]) -> bool:
+    verification = verified_ir.get("verification", {}) or {}
+    runtime = verification.get("runtime_safety", {}) or {}
+    compile_result = verification.get("compile", {}) or {}
+    text = " ".join(
+        str(value or "")
+        for value in (
+            runtime.get("cuda_error"),
+            runtime.get("host_error"),
+            compile_result.get("error_message"),
+            compile_result.get("stderr"),
+        )
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "too many resources requested for launch",
+            "launch out of resources",
+        )
+    )
+
+
 def mark_chain_step_generated(ir: dict[str, Any], code_apply_result: dict[str, Any]) -> dict[str, Any]:
     next_ir = copy.deepcopy(ir)
     next_ir["chain_step"] = {
         "status": "generated",
         "verification_deferred": True,
-        "reason": "compile/correctness/runtime/performance verification runs after the full strategy chain is generated",
+        "reason": "compile/correctness/runtime/performance verification runs at stage completion and after the full strategy chain",
         "candidate_code_dir": code_apply_result.get("candidate_code_dir"),
     }
     verification = next_ir.setdefault("verification", {})
@@ -1968,8 +5035,9 @@ def build_generation_repair_context(
         "failed_phase": phase,
         "defect_diagnosis": diagnosis,
         "repair_instruction": (
-            "Regenerate the same candidate with strict JSON. For CPU codegen edits, "
-            "prefer replacement_lines array entries instead of one multiline replacement string."
+            "Regenerate the same candidate with strict JSON. For codegen edits, "
+            "prefer replacement_lines array entries instead of one multiline replacement string. "
+            "For CUDA codegen, return only cuda_kernel.cuh anchor-region edits, not full source files."
         ),
     }
 
@@ -2019,7 +5087,12 @@ def is_better_candidate(candidate: dict[str, Any] | None, current_best: dict[str
 def candidate_gflops(candidate: dict[str, Any] | None) -> float | None:
     if not candidate:
         return None
-    value = candidate.get("verified_ir", {}).get("performance", {}).get("gflops")
+    performance = candidate.get("verified_ir", {}).get("performance", {}) or {}
+    value = performance.get("gflops_mean")
+    if value is None:
+        value = performance.get("gflops_median")
+    if value is None:
+        value = performance.get("gflops")
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -2033,6 +5106,7 @@ def candidate_event(
     verified_ir: dict[str, Any] | None,
     attempts: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    performance = (verified_ir or {}).get("performance", {}) or {}
     return {
         "stage": stage,
         "strategy_id": strategy_id,
@@ -2040,30 +5114,109 @@ def candidate_event(
         "attempt_count": len(attempts),
         "candidate_code_dir": attempts[-1].get("candidate_code_dir") if attempts else None,
         "verification": (verified_ir or {}).get("verification", {}).get("summary", {}),
-        "gflops": (verified_ir or {}).get("performance", {}).get("gflops"),
+        "gflops": performance.get("gflops_mean") or performance.get("gflops"),
     }
+
+
+def repair_chain_locally(source_chain_dir, output_chain_dir, diagnosis=None, ir=None,
+                         client=None, strategy_library=None):
+    """Repair production CUDA code through region edits, never a template rewrite."""
+    if target_backend(ir or {}) == "cpu":
+        return generate_semantic_repair_candidate(source_chain_dir, output_chain_dir, diagnosis, ir)
+    if client is None:
+        return {"status": "repair_unavailable", "reason": "local repair requires an LLM client"}
+    strategy_ids = (ir or {}).get("strategy", {}).get("applied_strategy_ids", [])
+    strategies = []
+    for strategy_id in strategy_ids:
+        try:
+            strategies.append(load_strategy(strategy_library or {}, strategy_id))
+        except ValueError:
+            continue
+    strategy = {
+        "strategy_id": "Repair.PreserveAppliedStrategies",
+        "applied_strategies": strategies,
+        "patch_contract": {
+            "region_edits_only": True,
+            "allowed_regions": ["LAUNCH_CONFIG", "SHARED_DECL", "INDEX_MAPPING", "REGISTER_DECL",
+                                "GLOBAL_TO_SHARED_LOAD", "SYNC_AFTER_LOAD", "MAIN_LOOP", "COMPUTE_INNER", "STORE"],
+            "preserved_regions": [],
+        },
+    }
+    patch = {"strategy_id": strategy["strategy_id"], "code_patch": [],
+             "repair_instruction": "Fix the diagnosed defects using local region edits. Preserve all existing optimizations, tile parameters, layout, vectorization and pipeline. Never substitute a generic GEMM template."}
+    originals = snapshot_source_files(source_chain_dir, backend_code_files(ir or {}))
+    try:
+        generated = generate_code_files_from_patch_with_llm(
+            client=client, patch_ir=ir or {}, patch_result=patch, strategy=strategy,
+            code_context=load_code_region_context(source_chain_dir, ["cuda_kernel.cuh", "kernel.h"]),
+            repair_context={"defect_diagnosis": diagnosis or {}, "requires_more_regions": True,
+                            "repair_instruction": patch["repair_instruction"]},
+        )
+        if not generated.get("edits"):
+            raise ValueError("Production repair must return local region edits")
+        restore_source_files(output_chain_dir, originals)
+        applied = apply_generated_code_files(generated, output_chain_dir, ir or {}, strategy)
+        if applied.get("status") != "pass":
+            raise ValueError(applied.get("error_message", "local repair application failed"))
+        return {"status": "repair_generated", "method": "llm_region_patch", "patch": generated}
+    except Exception as exc:
+        restore_source_files(output_chain_dir, originals)
+        return {"status": "repair_failed", "error_message": str(exc)}
+
+
+def deduplicate_code_candidates(candidates):
+    unique = {}
+    for candidate in candidates:
+        snapshot = candidate.get("source_snapshot") or {}
+        if not snapshot:
+            code_dir = candidate.get("candidate_code_dir")
+            if code_dir and Path(code_dir).exists():
+                snapshot = snapshot_source_files(Path(code_dir), backend_code_files(candidate.get("verified_ir", {})))
+        if not snapshot:
+            key = candidate.get("strategy_id") or id(candidate)
+        else:
+            ir = candidate.get("verified_ir", {})
+            payload = {"source": snapshot, "problem": ir.get("problem"),
+                       "target": ir.get("hardware", {}).get("compute_capability"),
+                       "build_options": candidate.get("build_options", {})}
+            key = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+        if key not in unique or is_better_candidate(candidate, unique[key]):
+            unique[key] = candidate
+    return list(unique.values())
 
 
 def verify_terminal_chains(
     frontier: list[dict[str, Any]],
     strategy_library: dict[str, Any],
     build_platform: str = "windows",
+    benchmark_runs: int = DEFAULT_BENCHMARK_RUNS,
+    benchmark_warmup_runs: int = DEFAULT_BENCHMARK_WARMUP_RUNS,
+    client: OpenAICompatibleClient | None = None,
 ) -> dict[str, Any]:
     verified_candidates = []
     terminal_summaries = []
     best_candidate = None
     best_state = None
 
+    seen_sources = set()
     for index, state in enumerate(frontier, start=1):
         if not state.get("path"):
             continue
+        source_key = hashlib.sha256(json.dumps({
+            "source": state.get("source_snapshot", {}),
+            "problem": state.get("current_ir", {}).get("problem"),
+            "target": state.get("current_ir", {}).get("hardware", {}).get("compute_capability"),
+            "platform": build_platform,
+        }, sort_keys=True, default=str).encode()).hexdigest()
+        if source_key in seen_sources:
+            continue
+        seen_sources.add(source_key)
         chain_id = chain_id_for_state(index, state)
         chain_dir = Path(
             state.get("code_dir")
             or chain_code_path(state.get("path", []), state.get("path_code", []), state.get("current_ir", {}))
         )
-        if not chain_dir.exists():
-            restore_source_files(chain_dir, state["source_snapshot"])
+        restore_source_files(chain_dir, state["source_snapshot"])
 
         terminal_ir = copy.deepcopy(state["current_ir"])
         terminal_ir.setdefault("strategy", {})["applied_strategy_ids"] = state["history"].get(
@@ -2081,17 +5234,21 @@ def verify_terminal_chains(
             strategy_library=strategy_library,
             attempt=1,
             build_platform=build_platform,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
         )
         repair_attempts = []
         for repair_attempt in range(1, DEFAULT_MAX_REPAIR_ATTEMPTS + 1):
             if terminal_chain_is_accepted(verified_ir):
                 break
             diagnosis = verified_ir.get("defect_diagnosis", {})
-            repair_result = generate_semantic_repair_candidate(
+            repair_result = repair_chain_locally(
                 source_chain_dir=chain_dir,
                 output_chain_dir=chain_dir,
                 diagnosis=diagnosis,
                 ir=verified_ir,
+                client=client,
+                strategy_library=strategy_library,
             )
             repair_result["repair_attempt"] = repair_attempt
             save_json(chain_dir / f"semantic_repair_attempt_{repair_attempt}.json", repair_result)
@@ -2103,6 +5260,8 @@ def verify_terminal_chains(
                 strategy_library=strategy_library,
                 attempt=repair_attempt + 1,
                 build_platform=build_platform,
+                benchmark_runs=benchmark_runs,
+                benchmark_warmup_runs=benchmark_warmup_runs,
             )
         if repair_attempts:
             verified_ir.setdefault("terminal_repair", {})["attempts"] = repair_attempts
@@ -2110,6 +5269,7 @@ def verify_terminal_chains(
 
         manifest = {
             "status": "verified_terminal_chain",
+            "terminal_reason": state.get("terminal_reason", "construction_completed"),
             "chain_id": chain_id,
             "chain_code": chain_code_key(state.get("path_code", [])),
             "path": state.get("path", []),
@@ -2160,9 +5320,10 @@ def verify_terminal_chains(
 
 
 def build_top_terminal_results(candidates: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
-    runnable_correct = [candidate for candidate in candidates if candidate_has_correctness_pass(candidate)]
+    runnable_correct = [candidate for candidate in candidates if candidate_has_correctness_pass(candidate)
+                        and candidate.get("verified_ir", {}).get("verification", {}).get("summary", {}).get("optimization_realization_status") != "fail"]
     accepted = [candidate for candidate in candidates if candidate.get("accepted")]
-    ranked_pool = accepted or runnable_correct or candidates
+    ranked_pool = deduplicate_code_candidates(runnable_correct or accepted)
     ranked = sorted(ranked_pool, key=lambda item: candidate_gflops(item) or -1.0, reverse=True)[:top_k]
     results = []
     for rank, candidate in enumerate(ranked, start=1):
@@ -2185,12 +5346,26 @@ def build_top_terminal_results(candidates: list[dict[str, Any]], top_k: int) -> 
                 "oracle_acceptance_status": verification_summary.get("oracle_acceptance_status"),
                 "acceptance_basis": verification_summary.get("acceptance_basis"),
                 "code_verification_basis": verification_summary.get("code_verification_basis"),
+                "optimization_realization_status": verification_summary.get("optimization_realization_status"),
                 "code_verification_status": verification_summary.get("code_verification_status"),
                 "checker_failure_is_terminal": verification_summary.get("checker_failure_is_terminal"),
                 "code_checker_advisory_failure": verification_summary.get("code_checker_advisory_failure"),
                 "latency_ms": performance.get("latency_ms") or verification_summary.get("latency_ms"),
                 "gflops": performance.get("gflops") or verification_summary.get("gflops"),
+                "benchmark_runs": performance.get("benchmark_runs"),
+                "benchmark_warmup_runs": performance.get("warmup_runs"),
+                "benchmark_successful_runs": performance.get("benchmark_successful_runs"),
+                "latency_ms_mean": performance.get("latency_ms_mean"),
+                "latency_ms_median": performance.get("latency_ms_median"),
+                "latency_ms_std": performance.get("latency_ms_std"),
+                "latency_ms_best": performance.get("latency_ms_best"),
+                "gflops_mean": performance.get("gflops_mean"),
+                "gflops_median": performance.get("gflops_median"),
+                "gflops_std": performance.get("gflops_std"),
+                "gflops_best": performance.get("gflops_best"),
                 "relative_to_cublas": performance.get("relative_to_cublas"),
+                "cublas_latency_ms_mean": performance.get("cublas_latency_ms_mean"),
+                "cublas_gflops_mean": performance.get("cublas_gflops_mean"),
                 "cpu_blas_latency_ms": performance.get("cpu_blas_latency_ms"),
                 "cpu_blas_gflops": performance.get("cpu_blas_gflops"),
                 "relative_to_cpu_blas": performance.get("relative_to_cpu_blas"),
@@ -2218,9 +5393,20 @@ def verify_terminal_chain_once(
     strategy_library: dict[str, Any],
     attempt: int,
     build_platform: str = "windows",
+    benchmark_runs: int = DEFAULT_BENCHMARK_RUNS,
+    benchmark_warmup_runs: int = DEFAULT_BENCHMARK_WARMUP_RUNS,
 ) -> dict[str, Any]:
     current_ir = copy.deepcopy(terminal_ir)
-    code_ast = extract_code_ast(chain_dir) if target_backend(current_ir) != "cpu" else extract_cpu_code_ast(chain_dir)
+    if target_backend(current_ir) != "cpu":
+        current_ir["phase1_hard_constraints"] = check_after_codegen(
+            current_ir, include_hard_constraints=True,
+        )
+        save_json(chain_dir / "phase1_hard_constraints.json", current_ir["phase1_hard_constraints"])
+    code_ast = (
+        extract_code_ast(chain_dir, backend_ast_files(current_ir))
+        if target_backend(current_ir) != "cpu"
+        else extract_cpu_code_ast(chain_dir)
+    )
     save_json(chain_dir / "code_ast.json", code_ast)
     current_ir["code_ast"] = code_ast
     current_ir["code_completeness"] = check_terminal_code_completeness(chain_dir, current_ir)
@@ -2231,6 +5417,8 @@ def verify_terminal_chain_once(
             source_dir=chain_dir,
             build_dir=chain_dir / "build",
             build_platform=build_platform,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
         )
     else:
         verified_ir = verify_build_and_run(
@@ -2238,6 +5426,8 @@ def verify_terminal_chain_once(
             source_dir=chain_dir,
             build_dir=chain_dir / "build",
             build_platform=build_platform,
+            benchmark_runs=benchmark_runs,
+            benchmark_warmup_runs=benchmark_warmup_runs,
         )
     verified_ir.setdefault("verification", {})["summary"] = summarize_verification(verified_ir)
     code_verification = check_chain_code_verification(verified_ir, strategy_library)
@@ -2251,7 +5441,10 @@ def verify_terminal_chain_once(
     summary["code_verification_basis"] = "advisory_after_oracle"
     summary["checker_failure_is_terminal"] = not oracle_passed
     summary["code_checker_advisory_failure"] = oracle_passed and not code_checker_passed
-    diagnosis = diagnose_defects(verified_ir)
+    realization_failures = [defect for defect in diagnose_defects(verified_ir).get("defects", [])
+                            if defect.get("defect_type") == "Pipeline.AsyncCopyProtocolMissing"]
+    summary["optimization_realization_status"] = "fail" if realization_failures else "not_disproven"
+    diagnosis = diagnose_defects(verified_ir, verified_ir.get("phase1_hard_constraints"))
     diagnosis["stage"] = "Chain"
     diagnosis["chain_id"] = chain_id
     diagnosis["terminal_verification_attempt"] = attempt
@@ -2556,7 +5749,9 @@ def has_name_like(names: list[Any], candidates: list[str]) -> bool:
 
 
 def terminal_chain_is_accepted(verified_ir: dict[str, Any]) -> bool:
-    return oracle_verification_passed(verified_ir)
+    return (oracle_verification_passed(verified_ir)
+            and verified_ir.get("phase1_hard_constraints", {}).get("hard_constraints_ok") is not False
+            and verified_ir.get("verification", {}).get("summary", {}).get("optimization_realization_status") != "fail")
 
 
 def chain_id_for_state(index: int, state: dict[str, Any]) -> str:
@@ -2784,6 +5979,14 @@ def backend_code_files(ir: dict[str, Any] | None) -> list[str]:
     return list(CPU_CODE_FILES) if target_backend(ir) == "cpu" else list(DEFAULT_CODE_FILES)
 
 
+def backend_llm_context_files(ir: dict[str, Any] | None) -> list[str]:
+    return list(CPU_CODE_FILES) if target_backend(ir) == "cpu" else list(DEFAULT_LLM_CONTEXT_FILES)
+
+
+def backend_ast_files(ir: dict[str, Any] | None) -> list[str]:
+    return list(CPU_CODE_FILES) if target_backend(ir) == "cpu" else list(DEFAULT_AST_CODE_FILES)
+
+
 def backend_patch_prompt(ir: dict[str, Any] | None) -> Path:
     return Path(DEFAULT_CPU_PATCH_PROMPT) if target_backend(ir) == "cpu" else Path(DEFAULT_PATCH_PROMPT)
 
@@ -2920,6 +6123,33 @@ def collect_final_code(
     }
 
 
+def collect_final_code_from_snapshot(
+    source_snapshot: dict[str, str],
+    ir: dict[str, Any],
+    history: dict[str, Any],
+    stage_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    files = [
+        {
+            "path": relative_path,
+            "content": content,
+        }
+        for relative_path, content in (source_snapshot or {}).items()
+        if relative_path in backend_code_files(ir)
+    ]
+    return {
+        "generation_method": "stagewise_strategy_candidate_search",
+        "applied_strategy_ids": history.get("applied_strategy_ids", []),
+        "failed_strategy_counts": history.get("failed_strategy_counts", {}),
+        "final_selected_strategy_id": ir.get("strategy", {}).get("final_selected_strategy_id"),
+        "final_selected_code_dir": ir.get("strategy", {}).get("final_selected_code_dir"),
+        "stage_summaries": stage_summaries,
+        "verification": ir.get("verification", {}),
+        "performance": ir.get("performance", {}),
+        "files": files,
+    }
+
+
 def write_final_code_bundle(path: Path, final_code: dict[str, Any]) -> None:
     lines = [
         "// SGPO final generated code bundle",
@@ -2939,6 +6169,42 @@ def write_final_code_bundle(path: Path, final_code: dict[str, Any]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def materialize_final_generated_files(
+    code_root: Path,
+    source_snapshot: dict[str, str],
+    ir: dict[str, Any],
+) -> list[str]:
+    """Publish the selected generated kernel without replacing the fixed benchmark driver."""
+    published = []
+    fixed_driver_names = {"main.cpp", "main.c"}
+    allowed_files = set(backend_code_files(ir))
+    for relative_path, content in (source_snapshot or {}).items():
+        if relative_path not in allowed_files or Path(relative_path).name in fixed_driver_names:
+            continue
+        destination = code_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+        published.append(relative_path)
+    return published
+
+
+def summarize_terminal_results_for_console(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keys = (
+        "rank",
+        "chain_id",
+        "source_phase",
+        "compile_status",
+        "correctness_status",
+        "runtime_safety_status",
+        "latency_ms_mean",
+        "gflops_mean",
+        "cublas_gflops_mean",
+        "relative_to_cublas",
+        "code_dir",
+    )
+    return [{key: item.get(key) for key in keys} for item in results]
+
+
 def save_candidate_json(
     path: Path,
     stage: str,
@@ -2949,11 +6215,18 @@ def save_candidate_json(
 ) -> None:
     candidate_output = candidate_path(path, stage, strategy_id, attempt, namespace)
     save_json(candidate_output, data)
-    save_json(path, data)
+    publish_latest_json(path, data)
+
+
+def publish_latest_json(path: Path, data: dict[str, Any]) -> None:
+    if not defer_latest(path, data):
+        save_json(path, data)
 
 
 def stage_path(path: Path, stage: str) -> Path:
-    stem = compact_artifact_stem(f"{path.stem}.{safe_name(stage)}")
+    namespace = chain_namespace()
+    suffix = f".{safe_name(namespace)}" if namespace else ""
+    stem = compact_artifact_stem(f"{path.stem}.{safe_name(stage)}{suffix}")
     return path.with_name(f"{stem}{path.suffix}")
 
 

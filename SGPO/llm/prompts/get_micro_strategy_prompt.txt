@@ -25,6 +25,10 @@ Rules:
 - Select up to 3 strategy_id values from allowed_strategy_ids. If at least 3 viable alternatives exist, return exactly 3.
 - Order candidates from most promising to least promising and assign confidence scores.
 - Each selected strategy_id will become a separate search path.
+- During Tiling, selection is hierarchical: BlockTile is selected first; WarpTile candidates have already
+  been filtered against that BlockTile; ThreadTile candidates have already been filtered against that WarpTile.
+- For Tiling selections, use the current problem dimensions, hardware limits, and already selected parent tile
+  fields in OptIR. Do not repeat or replace a parent-level Tiling decision.
 - Do not select strategies from other subphases.
 - Do not generate code.
 - Do not perform full post verification.

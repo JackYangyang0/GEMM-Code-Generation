@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,19 @@ DEFAULT_PATCH_IR_OUTPUT = ROOT / "data" / "IRs" / "ir_patch" / "optir.patch.json
 DEFAULT_POSTCHECK_OUTPUT = ROOT / "results" / "check" / "post_check_result.json"
 DEFAULT_CODE_ROOT = ROOT / "gemm_code" / "skeleton"
 DEFAULT_CODE_FILES = [
-    "main.cpp",
-    "cuda_kernel.cuh",
     "kernel.h",
+    "cuda_kernel.cuh",
+]
+CUDA_PATCH_REGIONS = [
+    "LAUNCH_CONFIG",
+    "SHARED_DECL",
+    "INDEX_MAPPING",
+    "REGISTER_DECL",
+    "GLOBAL_TO_SHARED_LOAD",
+    "SYNC_AFTER_LOAD",
+    "MAIN_LOOP",
+    "COMPUTE_INNER",
+    "STORE",
 ]
 
 
@@ -50,7 +61,31 @@ def generate_patch_with_llm(
         repair_context=repair_context,
     )
     response = client.complete_json(messages)
-    return validate_patch_response(response, strategy["strategy_id"])
+    patch = validate_patch_response(response, strategy["strategy_id"])
+    validate_patch_scope(patch, strategy)
+    return patch
+
+
+def validate_patch_scope(patch: dict[str, Any], strategy: dict[str, Any]) -> None:
+    contract = strategy.get("patch_contract") or {}
+    if not contract:
+        return
+    allowed_fields = set(contract["allowed_ir_fields"])
+    updates = patch.get("ir_updates") or {}
+    paths = set(updates)
+    for item in patch.get("modified_ir_fields", []) or []:
+        paths.add(item.get("path") if isinstance(item, dict) else item)
+    unexpected = paths - allowed_fields
+    if unexpected:
+        raise ValueError(f"Patch changes protected IR fields: {sorted(unexpected, key=str)}")
+    regions = list(patch.get("modified_code_regions") or [])
+    regions.extend((patch.get("code_patch") or {}).get("regions") or [])
+    if not regions:
+        raise ValueError("Local strategy patch must declare its changed regions")
+    for item in regions:
+        region = normalize_region_name(item.get("region") or item.get("anchor"))
+        if item.get("file") != "cuda_kernel.cuh" or region not in contract["allowed_regions"]:
+            raise ValueError(f"Patch changes protected code region: {item}")
 
 
 def build_patch_messages(
@@ -111,6 +146,115 @@ def load_code_context(code_root: Path, code_files: list[str] | None = None) -> d
         "code_root": str(code_root),
         "files": files,
         "patch_anchors": extract_patch_anchors(files),
+    }
+
+
+def load_code_region_context(
+    code_root: Path,
+    code_files: list[str] | None = None,
+    regions: list[str] | None = None,
+    context_radius: int = 8,
+) -> dict[str, Any]:
+    requested_regions = normalize_requested_regions(regions)
+    files: dict[str, Any] = {}
+    for relative_path in code_files or DEFAULT_CODE_FILES:
+        path = code_root / relative_path
+        content = path.read_text(encoding="utf-8")
+        anchors = extract_patch_anchors({relative_path: content}).get(relative_path, [])
+        if relative_path != "cuda_kernel.cuh":
+            files[relative_path] = {
+                "line_count": len(content.splitlines()),
+                "patch_anchors": anchors,
+                "summary": summarize_non_kernel_file(content),
+            }
+            continue
+        region_payload = {}
+        for region in requested_regions:
+            snippet = extract_anchor_region_snippet(content, region, context_radius=context_radius)
+            if snippet is not None:
+                region_payload[region] = snippet
+        files[relative_path] = {
+            "line_count": len(content.splitlines()),
+            "patch_anchors": anchors,
+            "regions": region_payload,
+        }
+    return {
+        "code_root": str(code_root),
+        "context_kind": "cuda_anchor_regions_only",
+        "files": files,
+        "requested_regions": requested_regions,
+        "rule": "Only edit listed anchor regions. Do not return full source files.",
+    }
+
+
+def normalize_requested_regions(regions: list[str] | None) -> list[str]:
+    result = []
+    seen = set()
+    for region in regions or []:
+        normalized = normalize_region_name(region)
+        if normalized in CUDA_PATCH_REGIONS and normalized not in seen:
+            result.append(normalized)
+            seen.add(normalized)
+    return result or ["COMPUTE_INNER"]
+
+
+def normalize_region_name(region: str | None) -> str:
+    text = str(region or "").strip()
+    text = text.replace("_BEGIN", "").replace("_END", "")
+    text = text.replace("ANCHOR_", "")
+    for candidate in CUDA_PATCH_REGIONS:
+        if candidate in text:
+            return candidate
+    return text
+
+
+def extract_anchor_region_snippet(content: str, region: str, context_radius: int = 8) -> dict[str, Any] | None:
+    lines = content.splitlines()
+    begin_marker = f"{region}_BEGIN"
+    end_marker = f"{region}_END"
+    occurrences = [i for i, line in enumerate(lines) if begin_marker in line]
+    if len(occurrences) > 1:
+        snippets = []
+        for start in occurrences:
+            end = next((i for i in range(start + 1, len(lines)) if end_marker in lines[i]), None)
+            if end is not None:
+                snippets.append({"start_line": start + 1, "end_line": end + 1,
+                                 "lines": lines[max(0, start - context_radius):end + context_radius + 1]})
+        return {"ambiguous": True, "occurrences": snippets,
+                "edit_instruction": "Do not edit this repeated anchor by name. Use unique enclosing regions and preserve every load/compute phase."}
+    begin_index = next((i for i, line in enumerate(lines) if begin_marker in line), None)
+    end_index = next((i for i, line in enumerate(lines) if end_marker in line and begin_index is not None and i > begin_index), None)
+    if begin_index is None or end_index is None:
+        return None
+    body_start = begin_index + 1
+    while body_start < end_index and "*/" not in lines[body_start]:
+        body_start += 1
+    if body_start < end_index and "*/" in lines[body_start]:
+        body_start += 1
+    body_end = end_index
+    while body_end > body_start and "/*" not in lines[body_end - 1]:
+        body_end -= 1
+    before_start = max(0, body_start - context_radius)
+    after_end = min(len(lines), body_end + context_radius)
+    return {
+        "anchor_begin": begin_marker,
+        "anchor_end": end_marker,
+        "body_start_line": body_start + 1,
+        "body_end_line": body_end,
+        "before_context": lines[before_start:body_start],
+        "body": lines[body_start:body_end],
+        "after_context": lines[body_end:after_end],
+    }
+
+
+def summarize_non_kernel_file(content: str) -> dict[str, Any]:
+    signatures = re.findall(
+        r"\b(?:void|int|float|double)\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*;",
+        content,
+    )
+    return {
+        "function_declarations": signatures[:20],
+        "contains_cuda_gemm_declaration": "cuda_gemm" in content,
     }
 
 
@@ -256,6 +400,9 @@ def build_patch_ir(
     for path, value in ordered_ir_updates(patch_result.get("ir_updates", {})):
         set_path(ir_after, path, value)
     enrich_derived_ir_fields(ir_after)
+    if ir_after.get("target", {}).get("backend") != "cpu" and ir_after.get("memory", {}).get("use_shared_memory") is True:
+        from SGPO.generate_ir.stage_controller import derive_resource_fields
+        derive_resource_fields(ir_after)
 
     strategy_node = ir_after.setdefault("strategy", {})
     strategy_node["current_stage"] = strategy.get("stage")

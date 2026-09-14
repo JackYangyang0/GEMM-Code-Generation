@@ -1,4 +1,13 @@
 {
+  "stage_order": [
+    "Tiling",
+    "Layout",
+    "MappingReordering",
+    "Vectorization",
+    "Pipeline",
+    "Epilogue",
+    "Compiler"
+  ],
   "stages": {
     "Tiling": {
       "entry_conditions": [
@@ -120,7 +129,7 @@
             "all block/warp/thread fields exist",
             "block_m % warp_m == 0",
             "block_n % warp_n == 0",
-            "warp_m * warp_n == warp_size * thread_m * thread_n * warp_m_iter * warp_n_iter",
+            "warp_size == (warp_m_iter / thread_m) * (warp_n_iter / thread_n)",
             "threads_per_block <= hardware.max_threads_per_block"
           ],
           "stage_verifiers": [
@@ -163,7 +172,13 @@
             "Layout.SharedMemory.Padding*",
             "Layout.SharedMemory.Transpose*",
             "Layout.SharedMemory.Skew*",
-            "Layout.SharedMemory.WarpAwareSwizzle*"
+            "Layout.SharedMemory.WarpAwareSwizzle*",
+            "Memory.SharedMemory.DynamicOptIn",
+            "Layout.SharedMemory.WarpAwareSwizzleA",
+            "Layout.SharedMemory.SkewA.Xor",
+            "Layout.SharedMemory.WarpAwareSwizzleB",
+            "Layout.SharedMemory.SkewB.Xor",
+            "Layout.SharedMemory.BankConflictAnalysis"
           ],
           "requires_fields": [
             "memory.shared_A.shape",
@@ -225,10 +240,17 @@
             "Reordering.LoadCompute.SeparatePhases"
           ],
           "requires_fields": [
-            "memory.use_shared_memory"
+            "memory.use_shared_memory",
+            "memory.shared_A.shape",
+            "memory.shared_B.shape",
+            "memory.use_register_tile",
+            "mapping.threads_per_block",
+            "tiling.block_k"
           ],
           "provides_fields": [
-            "schedule.loop_structure"
+            "schedule.loop_structure",
+            "synchronization.sync_policy.after_global_to_shared_load",
+            "synchronization.sync_policy.before_shared_buffer_reuse"
           ],
           "next": [
             "Reordering.CooperativeLoadMapping"
@@ -261,7 +283,8 @@
             "Reordering.KLoop.*",
             "Reordering.WarpCompute.*",
             "Register.Cache*.Fragment",
-            "Register.FFMA.Schedule*"
+            "Register.FFMA.Schedule*",
+            "Reordering.ComputeBundle.*"
           ],
           "requires_fields": [
             "memory.use_register_tile",
@@ -386,6 +409,7 @@
         "Pipeline.ResourcePrecheck",
         "Pipeline.BufferingSelection",
         "Pipeline.PrefetchSelection",
+        "Pipeline.LargeMatrixScheduling",
         "Pipeline.StageVerification"
       ],
       "subphases": {
@@ -410,7 +434,11 @@
           "allowed_strategy_patterns": [
             "Pipeline.DoubleBuffer.*",
             "Pipeline.WarpAwareDoubleBuffer.*",
-            "Pipeline.NoAsyncCopy.V1"
+            "Pipeline.NoAsyncCopy.V1",
+            "Pipeline.CpAsync.Multistage*.SharedAB",
+            "Pipeline.CpAsync.Multistage2.SharedAB",
+            "Pipeline.CpAsync.Multistage3.SharedAB",
+            "Pipeline.CpAsync.Multistage4.SharedAB"
           ],
           "requires_fields": [
             "resource.shared_memory.total_bytes"
@@ -435,7 +463,7 @@
             "resource.register"
           ],
           "next": [
-            "Pipeline.StageVerification"
+            "Pipeline.LargeMatrixScheduling"
           ]
         },
         "Pipeline.StageVerification": {
@@ -453,6 +481,34 @@
           ],
           "on_pass": "enter Epilogue or Compiler",
           "on_fail": "rollback pipeline or reduce tile/buffer strategy"
+        },
+        "Pipeline.LargeMatrixScheduling": {
+          "allowed_strategy_patterns": [
+            "Mapping.CTASwizzle.*",
+            "Memory.L2Reuse.*",
+            "Scheduling.PersistentCTA.*",
+            "Reduction.StreamK.*",
+            "Reduction.SplitK.*",
+            "Reduction.SplitK.Workspace",
+            "Reduction.StreamK.WorkDecomposition",
+            "Memory.L2Persistence.AccessWindow"
+          ],
+          "requires_fields": [
+            "problem.size_class",
+            "tiling.block_m",
+            "tiling.block_n",
+            "mapping.threads_per_block"
+          ],
+          "provides_fields": [
+            "scheduling.cta_swizzle",
+            "memory.l2_reuse_policy",
+            "scheduling.persistent_cta",
+            "scheduling.work_decomposition"
+          ],
+          "optional": true,
+          "next": [
+            "Pipeline.StageVerification"
+          ]
         }
       }
     },
@@ -537,7 +593,12 @@
             "Compiler.ForceInline.*",
             "Compiler.RestrictPointer",
             "Compiler.FastMath.Enabled",
-            "Compiler.TemplateSpecialization.*"
+            "Compiler.TemplateSpecialization.*",
+            "Memory.SharedMemory.Carveout.0",
+            "Memory.SharedMemory.Carveout.50",
+            "Memory.SharedMemory.Carveout.100",
+            "Compiler.LaunchBounds.MaxThreads",
+            "Compiler.LaunchBounds.MinBlocksPerSM"
           ],
           "provides_fields": [
             "compiler.attributes"
@@ -550,7 +611,8 @@
           "allowed_strategy_patterns": [
             "Compiler.Ptxas.MaxRegisterCount",
             "Tuning.WarpOccupancyBalance",
-            "Scheduling.WaveQuantization.SMResidentBlocks"
+            "Scheduling.WaveQuantization.SMResidentBlocks",
+            "Compiler.ResourceFeedback.PtxasOccupancySweep"
           ],
           "provides_fields": [
             "resource.register.final",
@@ -641,5 +703,337 @@
       "PreviousAcceptedCheckpoint",
       "StageController"
     ]
-  ]
+  ],
+  "graph_version": "8.1",
+  "requires": {
+    "Reordering.ComputeBundle.RegisterTiledOuterProduct": [
+      {
+        "mode": "all",
+        "strategies": [
+          "Tiling.ThreadTile.*",
+          "Layout.SharedMemory.AB.Basic"
+        ]
+      },
+      {
+        "required_state": {
+          "memory.use_register_tile": true,
+          "mapping.thread_to_output": "not null"
+        }
+      }
+    ],
+    "Pipeline.CpAsync.Multistage3.SharedAB": [
+      {
+        "mode": "all",
+        "strategies": [
+          "Layout.SharedMemory.AB.Basic",
+          "Reordering.LoadCompute.SeparatePhases"
+        ]
+      },
+      {
+        "required_state": {
+          "hardware.supports_cp_async": true,
+          "memory.use_shared_memory": true
+        }
+      }
+    ],
+    "Pipeline.CpAsync.Multistage4.SharedAB": [
+      {
+        "mode": "all",
+        "strategies": [
+          "Layout.SharedMemory.AB.Basic",
+          "Reordering.LoadCompute.SeparatePhases"
+        ]
+      },
+      {
+        "required_state": {
+          "hardware.supports_cp_async": true,
+          "memory.use_shared_memory": true
+        }
+      },
+      {
+        "required_state": {
+          "problem.K": ">=1024"
+        }
+      }
+    ],
+    "Scheduling.PersistentCTA.GridStrideTiles": [
+      {
+        "required_state": {
+          "tiling.block_m": "not null",
+          "tiling.block_n": "not null",
+          "hardware.sm_count": ">=1"
+        }
+      }
+    ],
+    "Reduction.SplitK.Workspace": [
+      {
+        "mode": "all",
+        "strategies": [
+          "Tiling.BlockTile.*"
+        ]
+      },
+      {
+        "required_state": {
+          "problem.K": ">=2048",
+          "tiling.block_k": "not null"
+        }
+      }
+    ],
+    "Compiler.ResourceFeedback.PtxasOccupancySweep": [
+      {
+        "required_state": {
+          "verification.compile.status": "pass"
+        }
+      }
+    ],
+    "Pipeline.CpAsync.Multistage2.SharedAB": [
+      {
+        "mode": "all",
+        "strategies": [
+          "Layout.SharedMemory.AB.Basic",
+          "Reordering.LoadCompute.SeparatePhases"
+        ]
+      },
+      {
+        "required_state": {
+          "hardware.supports_cp_async": true,
+          "memory.use_shared_memory": true
+        }
+      }
+    ],
+    "Memory.SharedMemory.DynamicOptIn": [],
+    "Memory.SharedMemory.Carveout.0": [],
+    "Memory.SharedMemory.Carveout.50": [],
+    "Memory.SharedMemory.Carveout.100": [],
+    "Layout.SharedMemory.WarpAwareSwizzleA": [],
+    "Layout.SharedMemory.SkewA.Xor": [],
+    "Layout.SharedMemory.WarpAwareSwizzleB": [],
+    "Layout.SharedMemory.SkewB.Xor": [],
+    "Layout.SharedMemory.BankConflictAnalysis": [],
+    "Reduction.StreamK.WorkDecomposition": [],
+    "Memory.L2Persistence.AccessWindow": [],
+    "Compiler.LaunchBounds.MaxThreads": [],
+    "Compiler.LaunchBounds.MinBlocksPerSM": [],
+    "Tuning.WarpOccupancyBalance": []
+  },
+  "conflicts": {
+    "Reordering.ComputeBundle.RegisterTiledOuterProduct": [
+      {
+        "severity": "hard",
+        "strategies": [
+          "Register.FFMA.Schedule*",
+          "Reordering.WarpCompute.*"
+        ]
+      }
+    ],
+    "Pipeline.CpAsync.Multistage3.SharedAB": [
+      {
+        "severity": "hard",
+        "strategies": [
+          "Pipeline.NoAsyncCopy.V1",
+          "Pipeline.DoubleBuffer.*",
+          "Pipeline.WarpAwareDoubleBuffer.*",
+          "Pipeline.CpAsync.Multistage2.SharedAB",
+          "Pipeline.CpAsync.Multistage4.SharedAB"
+        ]
+      }
+    ],
+    "Pipeline.CpAsync.Multistage4.SharedAB": [
+      {
+        "severity": "hard",
+        "strategies": [
+          "Pipeline.NoAsyncCopy.V1",
+          "Pipeline.DoubleBuffer.*",
+          "Pipeline.WarpAwareDoubleBuffer.*",
+          "Pipeline.CpAsync.Multistage2.SharedAB",
+          "Pipeline.CpAsync.Multistage3.SharedAB"
+        ]
+      }
+    ],
+    "Scheduling.PersistentCTA.GridStrideTiles": [
+      {
+        "severity": "hard",
+        "strategies": [
+          "Scheduling.PersistentCTA.StaticTileLoop",
+          "Reduction.StreamK.*",
+          "Reduction.SplitK.*"
+        ]
+      }
+    ],
+    "Reduction.SplitK.Workspace": [
+      {
+        "severity": "hard",
+        "strategies": [
+          "Reduction.StreamK.*",
+          "Scheduling.PersistentCTA.*"
+        ]
+      }
+    ],
+    "Pipeline.CpAsync.Multistage2.SharedAB": [
+      {
+        "severity": "hard",
+        "strategies": [
+          "Pipeline.NoAsyncCopy.V1",
+          "Pipeline.DoubleBuffer.*",
+          "Pipeline.WarpAwareDoubleBuffer.*",
+          "Pipeline.CpAsync.Multistage3.SharedAB",
+          "Pipeline.CpAsync.Multistage4.SharedAB"
+        ]
+      }
+    ]
+  },
+  "fallback": {
+    "Tiling.ThreadTile.4x8": [
+      {
+        "strategies": [
+          "Tiling.ThreadTile.4x4",
+          "Tiling.ThreadTile.2x2"
+        ]
+      }
+    ],
+    "Tiling.ThreadTile.8x4": [
+      {
+        "strategies": [
+          "Tiling.ThreadTile.4x4",
+          "Tiling.ThreadTile.2x2"
+        ]
+      }
+    ],
+    "Tiling.ThreadTile.2x4": [
+      {
+        "strategies": [
+          "Tiling.ThreadTile.2x2",
+          "Tiling.ThreadTile.4x4"
+        ]
+      }
+    ],
+    "Tiling.ThreadTile.4x2": [
+      {
+        "strategies": [
+          "Tiling.ThreadTile.2x2",
+          "Tiling.ThreadTile.4x4"
+        ]
+      }
+    ],
+    "Tiling.ThreadTile.2x8": [
+      {
+        "strategies": [
+          "Tiling.ThreadTile.2x4",
+          "Tiling.ThreadTile.2x2"
+        ]
+      }
+    ],
+    "Tiling.ThreadTile.8x2": [
+      {
+        "strategies": [
+          "Tiling.ThreadTile.4x2",
+          "Tiling.ThreadTile.2x2"
+        ]
+      }
+    ],
+    "Reordering.ComputeBundle.RegisterTiledOuterProduct": [
+      {
+        "strategies": [
+          "Register.FFMA.ScheduleOuterProduct",
+          "Reordering.KLoop.Unroll4"
+        ]
+      }
+    ],
+    "Pipeline.CpAsync.Multistage4.SharedAB": [
+      {
+        "strategies": [
+          "Pipeline.CpAsync.Multistage3.SharedAB",
+          "Pipeline.CpAsync.Multistage2.SharedAB",
+          "Pipeline.DoubleBuffer.SharedAB",
+          "Pipeline.NoAsyncCopy.V1"
+        ]
+      }
+    ],
+    "Pipeline.CpAsync.Multistage3.SharedAB": [
+      {
+        "strategies": [
+          "Pipeline.CpAsync.Multistage2.SharedAB",
+          "Pipeline.DoubleBuffer.SharedAB",
+          "Pipeline.NoAsyncCopy.V1"
+        ]
+      }
+    ],
+    "Scheduling.PersistentCTA.GridStrideTiles": [
+      {
+        "strategies": [
+          "Mapping.CTASwizzle.GroupedN",
+          "Mapping.CTASwizzle.GroupedM"
+        ]
+      }
+    ],
+    "Reduction.SplitK.Workspace": [
+      {
+        "strategies": [
+          "Reduction.StreamK.WorkDecomposition"
+        ]
+      }
+    ],
+    "Compiler.ResourceFeedback.PtxasOccupancySweep": [
+      {
+        "strategies": [
+          "Tuning.WarpOccupancyBalance",
+          "Compiler.Ptxas.MaxRegisterCount"
+        ]
+      }
+    ],
+    "Pipeline.CpAsync.Multistage2.SharedAB": [
+      {
+        "strategies": [
+          "Pipeline.DoubleBuffer.SharedAB",
+          "Pipeline.NoAsyncCopy.V1"
+        ]
+      }
+    ]
+  },
+  "supersedes": {
+    "Pipeline.CpAsync.Multistage3.SharedAB": [
+      "Pipeline.NoAsyncCopy.V1",
+      "Pipeline.DoubleBuffer.*",
+      "Pipeline.WarpAwareDoubleBuffer.*"
+    ],
+    "Pipeline.CpAsync.Multistage4.SharedAB": [
+      "Pipeline.NoAsyncCopy.V1",
+      "Pipeline.DoubleBuffer.*",
+      "Pipeline.WarpAwareDoubleBuffer.*"
+    ],
+    "Scheduling.PersistentCTA.GridStrideTiles": [
+      "Scheduling.PersistentCTA.StaticTileLoop"
+    ],
+    "Reduction.SplitK.Workspace": [
+      "Reduction.StreamK.*"
+    ],
+    "Pipeline.CpAsync.Multistage2.SharedAB": [
+      "Pipeline.NoAsyncCopy.V1",
+      "Pipeline.DoubleBuffer.*",
+      "Pipeline.WarpAwareDoubleBuffer.*"
+    ]
+  },
+  "phase_flow": {
+    "phase1": [
+      "Tiling",
+      "Layout",
+      "MappingReordering",
+      "Vectorization",
+      "Pipeline",
+      "Epilogue",
+      "Compiler",
+      "FinalVerification",
+      "Phase1Top3"
+    ],
+    "phase2": [
+      "MatrixProfile",
+      "UnlockCandidateFilter",
+      "LLMBatchPlan",
+      "BatchPatchApply",
+      "CompileCorrectnessPerformance",
+      "RepairFallbackRollback",
+      "UnifiedTop3Ranking"
+    ],
+    "entry_condition": "Phase1Top3 compile, correctness, and runtime_safety pass"
+  }
 }

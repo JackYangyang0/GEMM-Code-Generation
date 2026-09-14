@@ -10,7 +10,17 @@ from pathlib import Path
 from typing import Any
 
 from SGPO.utils.common_utils import load_config, load_json, save_json
-from SGPO.verification.build_run_verifier import normalize_build_platform, parse_run_metrics, truncate
+from SGPO.utils.execution import execution_slot, limited
+from SGPO.verification.build_run_verifier import (
+    DEFAULT_BENCHMARK_RUNS,
+    DEFAULT_BENCHMARK_WARMUP_RUNS,
+    aggregate_benchmark_results,
+    ensure_text_result,
+    normalize_build_platform,
+    parse_run_metrics,
+    result_text,
+    truncate,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +39,8 @@ def verify_cpu_build_and_run(
     timeout_seconds: int = 60,
     openblas_root: Path | None = None,
     build_platform: str = "windows",
+    benchmark_runs: int = DEFAULT_BENCHMARK_RUNS,
+    benchmark_warmup_runs: int = DEFAULT_BENCHMARK_WARMUP_RUNS,
 ) -> dict[str, Any]:
     next_ir = copy.deepcopy(ir)
     build_platform = normalize_build_platform(build_platform)
@@ -44,13 +56,15 @@ def verify_cpu_build_and_run(
         mark_cpu_unrun(next_ir, "compile failed")
         return next_ir
 
-    run_result = run_cpu_gemm(exe_path, next_ir, timeout_seconds)
-    update_cpu_run_result(next_ir, run_result)
-    baseline_result = run_cpu_optimized_baseline(next_ir, build_dir, timeout_seconds, openblas_root, build_platform)
-    update_cpu_optimized_baseline_result(next_ir, baseline_result)
+    with execution_slot("gpu_verification"):
+        run_result = run_cpu_gemm_benchmark(exe_path, next_ir, timeout_seconds, benchmark_runs, benchmark_warmup_runs)
+        update_cpu_run_result(next_ir, run_result)
+        baseline_result = run_cpu_optimized_baseline(next_ir, build_dir, timeout_seconds, openblas_root, build_platform)
+        update_cpu_optimized_baseline_result(next_ir, baseline_result)
     return next_ir
 
 
+@limited("compile")
 def compile_cpu_gemm(
     source_dir: Path,
     exe_path: Path,
@@ -136,6 +150,7 @@ def msvc_compile_flags(policy: dict[str, Any]) -> list[str]:
     return flags
 
 
+@limited("gpu_verification")
 def run_cpu_gemm(exe_path: Path, ir: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     problem = ir.get("problem", {})
     command = [
@@ -145,10 +160,46 @@ def run_cpu_gemm(exe_path: Path, ir: dict[str, Any], timeout_seconds: int) -> di
         str(problem.get("N", 512)),
     ]
     result = run_command(command, cwd=exe_path.parent, timeout_seconds=timeout_seconds)
-    result["metrics"] = parse_run_metrics(result["stdout"] + "\n" + result["stderr"])
+    result["metrics"] = parse_run_metrics(result_text(result))
     return result
 
 
+@limited("gpu_verification")
+def run_cpu_gemm_benchmark(
+    exe_path: Path,
+    ir: dict[str, Any],
+    timeout_seconds: int,
+    benchmark_runs: int = DEFAULT_BENCHMARK_RUNS,
+    warmup_runs: int = DEFAULT_BENCHMARK_WARMUP_RUNS,
+) -> dict[str, Any]:
+    problem = ir.get("problem", {})
+    command = [
+        str(exe_path),
+        str(problem.get("M", 512)),
+        str(problem.get("K", 512)),
+        str(problem.get("N", 512)),
+    ]
+    measured_count = max(1, int(benchmark_runs or DEFAULT_BENCHMARK_RUNS))
+    warmup_count = max(0, int(warmup_runs or 0))
+    warmup_results = []
+    measured_results = []
+    for _ in range(warmup_count):
+        result = run_command(command, cwd=exe_path.parent, timeout_seconds=timeout_seconds)
+        result["metrics"] = parse_run_metrics(result_text(result))
+        result["cuda_error"] = None
+        warmup_results.append(result)
+        if result.get("status") != "pass":
+            break
+    if not warmup_results or all(item.get("status") == "pass" for item in warmup_results):
+        for _ in range(measured_count):
+            result = run_command(command, cwd=exe_path.parent, timeout_seconds=timeout_seconds)
+            result["metrics"] = parse_run_metrics(result_text(result))
+            result["cuda_error"] = None
+            measured_results.append(result)
+    return aggregate_benchmark_results(command, warmup_results, measured_results)
+
+
+@limited("gpu_verification")
 def run_cpu_optimized_baseline(
     ir: dict[str, Any],
     build_dir: Path,
@@ -207,7 +258,7 @@ def run_cpu_optimized_baseline(
         env=env,
     )
     try:
-        result["metrics"] = json.loads(result["stdout"].strip().splitlines()[-1])
+        result["metrics"] = json.loads(result_text(result).strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError):
         result["metrics"] = {}
     result["compile"] = compile_result
@@ -238,6 +289,7 @@ def resolve_openblas_root(openblas_root: Path | None = None) -> Path | None:
     return None
 
 
+@limited("compile")
 def compile_openblas_baseline(
     source_path: Path,
     exe_path: Path,
@@ -311,22 +363,22 @@ def run_command(
             timeout=timeout_seconds,
             check=False,
         )
-        return {
+        return ensure_text_result({
             "status": "pass" if proc.returncode == 0 else "fail",
             "command": command,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
             "returncode": proc.returncode,
-        }
+        })
     except subprocess.TimeoutExpired as exc:
-        return {
+        return ensure_text_result({
             "status": "fail",
             "command": command,
             "stdout": exc.stdout or "",
             "stderr": exc.stderr or f"timeout after {timeout_seconds}s",
             "returncode": None,
             "timeout": True,
-        }
+        })
     except OSError as exc:
         return {
             "status": "fail",
@@ -338,9 +390,10 @@ def run_command(
 
 
 def update_cpu_compile_result(ir: dict[str, Any], compile_result: dict[str, Any]) -> None:
+    compile_result = ensure_text_result(compile_result)
     verification = ir.setdefault("verification", {})
     compile_node = verification.setdefault("compile", {})
-    output_text = "\n".join(part for part in [compile_result.get("stdout"), compile_result.get("stderr")] if part)
+    output_text = result_text(compile_result)
     compile_node["status"] = compile_result["status"]
     compile_node["backend"] = "cpu"
     compile_node["build_platform"] = compile_result.get("build_platform")
@@ -367,7 +420,8 @@ def mark_cpu_unrun(ir: dict[str, Any], reason: str) -> None:
 
 
 def update_cpu_run_result(ir: dict[str, Any], run_result: dict[str, Any]) -> None:
-    text = run_result["stdout"] + "\n" + run_result["stderr"]
+    run_result = ensure_text_result(run_result)
+    text = result_text(run_result)
     metrics = run_result.get("metrics", {})
     verification = ir.setdefault("verification", {})
     correctness = verification.setdefault("correctness", {})
@@ -394,6 +448,25 @@ def update_cpu_run_result(ir: dict[str, Any], run_result: dict[str, Any]) -> Non
     performance = ir.setdefault("performance", {})
     performance["latency_ms"] = metrics.get("latency_ms")
     performance["gflops"] = metrics.get("gflops")
+    for key in [
+        "latency_ms_mean",
+        "latency_ms_median",
+        "latency_ms_std",
+        "latency_ms_best",
+        "latency_ms_min",
+        "latency_ms_max",
+        "gflops_mean",
+        "gflops_median",
+        "gflops_std",
+        "gflops_best",
+        "gflops_min",
+        "gflops_max",
+        "benchmark_runs",
+        "warmup_runs",
+        "benchmark_successful_runs",
+    ]:
+        if key in metrics:
+            performance[key] = metrics[key]
 
     verification["accepted"] = (
         verification.get("compile", {}).get("status") == "pass"
@@ -403,6 +476,7 @@ def update_cpu_run_result(ir: dict[str, Any], run_result: dict[str, Any]) -> Non
     verification["accept_reason"] = "CPU compile, correctness, and runtime safety passed" if verification["accepted"] else None
     verification["run_stdout"] = truncate(run_result["stdout"])
     verification["run_stderr"] = truncate(run_result["stderr"])
+    verification["benchmark"] = run_result.get("benchmark")
 
 
 def update_cpu_optimized_baseline_result(ir: dict[str, Any], baseline_result: dict[str, Any]) -> None:
@@ -558,11 +632,20 @@ def main() -> None:
     parser.add_argument("--output-ir", default=str(DEFAULT_OUTPUT_IR))
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--build-platform", choices=["windows", "linux"], default=None)
+    parser.add_argument("--benchmark-runs", type=int, default=None)
+    parser.add_argument("--benchmark-warmup-runs", type=int, default=None)
     args = parser.parse_args()
 
     config = load_config(Path(args.config))
     timeout_seconds = int(config.get("verification", {}).get("timeout_seconds", 60))
+    build_config = config.get("build", {}) or {}
     build_platform = args.build_platform or (config.get("build", {}) or {}).get("platform", "windows")
+    benchmark_runs = args.benchmark_runs if args.benchmark_runs is not None else build_config.get("benchmark_runs", DEFAULT_BENCHMARK_RUNS)
+    benchmark_warmup_runs = (
+        args.benchmark_warmup_runs
+        if args.benchmark_warmup_runs is not None
+        else build_config.get("benchmark_warmup_runs", DEFAULT_BENCHMARK_WARMUP_RUNS)
+    )
     ir = load_json(Path(args.ir))
     verified_ir = verify_cpu_build_and_run(
         ir=ir,
@@ -570,6 +653,8 @@ def main() -> None:
         build_dir=Path(args.build_dir),
         timeout_seconds=timeout_seconds,
         build_platform=build_platform,
+        benchmark_runs=int(benchmark_runs),
+        benchmark_warmup_runs=int(benchmark_warmup_runs),
     )
     save_json(Path(args.output_ir), verified_ir)
     print(json.dumps({

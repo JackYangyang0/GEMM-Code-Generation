@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 
+IDENTIFIER = r"[A-Za-z_]\w*"
+
+
 def check_gemm_semantic_obligations(chain_dir: Path, ir: dict[str, Any] | None = None) -> dict[str, Any]:
     kernel_path = chain_dir / "cuda_kernel.cuh"
     if not kernel_path.exists():
@@ -35,6 +38,12 @@ def check_gemm_semantic_obligations(chain_dir: Path, ir: dict[str, Any] | None =
 
     results = [
         check_cuda_compile_hazard_patterns(code, launch_config),
+        check_loop_index_scope(code),
+        check_shared_array_pointer_layout(code, launch_config),
+        check_shared_tile_indices_are_local(code),
+        check_first_k_tile_is_accumulated(code),
+        check_cta_swizzle_preserves_grid_extent(code),
+        check_store_bounds_use_global_coordinates(content, code),
         check_no_scalar_fallback_mixed_with_optimized_regions(content, code),
         check_warp_lane_fragment_coverage(code, launch_config, ir or {}),
         check_thread_tile_mapping_covers_block(code, bm, bn, tm, tn),
@@ -44,6 +53,7 @@ def check_gemm_semantic_obligations(chain_dir: Path, ir: dict[str, Any] | None =
         check_fast_k_loop_divisibility(code, launch_config, ir or {}),
         check_vectorized_fast_path_guards(code, host_code, launch_config, ir or {}),
         check_A_register_initialization(code, bk),
+        check_vector_shared_load_mapping_bounds(code, launch_config),
         check_shared_memory_is_cooperatively_loaded(code, bm, bn, bk),
         check_shared_load_not_nested_under_output_group_loop(code),
         check_shared_memory_is_used_by_compute(code),
@@ -54,6 +64,146 @@ def check_gemm_semantic_obligations(chain_dir: Path, ir: dict[str, Any] | None =
         "launch_config": {key: value for key, value in launch_config.items() if key in {"BM", "BN", "BK", "TM", "TN", "WM", "WN", "WMITER", "WNITER"}},
         "results": results,
     }
+
+
+def check_loop_index_scope(code: str) -> dict[str, Any]:
+    for name in ("bkIdx", "k_iter", "k4"):
+        declaration = re.search(rf"\b(?:int|const\s+int)\s+{name}\b", code)
+        use = re.search(rf"\b{name}\b", code)
+        if use and (not declaration or use.start() < declaration.start()):
+            return make_result(
+                "GEMM_LOOP_INDEX_SCOPE_VALID", "fail",
+                f"{name} is referenced before its declaration or outside its valid loop scope.",
+                "Compile.LoopIndexOutOfScope",
+                f"move the {name}-dependent expression inside the declaring loop, or remove {name} from initialization code",
+                {"symbol": name, "first_use_offset": use.start(), "declaration_offset": declaration.start() if declaration else None},
+            )
+    return make_result("GEMM_LOOP_INDEX_SCOPE_VALID", "pass", "K-loop indices are not used before declaration.")
+
+
+def check_shared_array_pointer_layout(code: str, launch_config: dict[str, int]) -> dict[str, Any]:
+    declarations = {
+        name: (first, second)
+        for name, first, second in re.findall(
+            r"__shared__\s+float\s+(As0|As1|Bs0|Bs1)\s*\[\s*(\w+)\s*\]\s*\[\s*(\w+)\s*\]", code
+        )
+    }
+    pointer_widths = {
+        name: width
+        for name, width in re.findall(r"float\s*\(\s*\*(As_ptr|As_final|Bs_ptr|Bs_final)\s*\)\s*\[\s*(\w+)\s*\]", code)
+    }
+    mismatches = []
+    for pointer, array in re.findall(r"\b(As_ptr|As_final|Bs_ptr|Bs_final)\s*=\s*(As0|As1|Bs0|Bs1)\s*;", code):
+        if pointer in pointer_widths and array in declarations and declarations[array][1] != pointer_widths[pointer]:
+            mismatches.append({
+                "pointer": pointer, "pointer_inner_extent": pointer_widths[pointer],
+                "array": array, "array_inner_extent": declarations[array][1],
+            })
+    if mismatches:
+        return make_result(
+            "GEMM_SHARED_ARRAY_POINTER_LAYOUT_MATCHES", "fail",
+            "shared-memory arrays decay to pointer types with incompatible inner extents.",
+            "Compile.SharedArrayPointerTypeMismatch",
+            "make the shared array rank/order match its pointer view and compute indexing (for As_ptr[k][m], declare As[BK][BM])",
+            {"mismatches": mismatches, "launch_config": launch_config},
+        )
+    return make_result("GEMM_SHARED_ARRAY_POINTER_LAYOUT_MATCHES", "pass", "shared arrays and their pointer views have matching inner extents.")
+
+
+def check_shared_tile_indices_are_local(code: str) -> dict[str, Any]:
+    pattern = re.compile(
+        r"\b(As0|As1|Bs0|Bs1)\s*\[\s*([^\]]*\bbkIdx\b[^\]]*|[^\]]*\*\s*BK[^\]]*)\s*\]"
+        r"|\b(As0|As1|Bs0|Bs1)\s*\[[^\]]+\]\s*\[\s*([^\]]*\bbkIdx\b[^\]]*|[^\]]*\*\s*BK[^\]]*)\s*\]"
+    )
+    bad = [match.group(0) for match in pattern.finditer(code)]
+    if bad:
+        return make_result(
+            "GEMM_SHARED_TILE_INDICES_ARE_LOCAL", "fail",
+            "global K-tile offsets are used as shared-memory indices and can exceed the BK-sized buffer.",
+            "GEMM.Semantic.SharedMemoryTileIndexOutOfBounds",
+            "apply (bkIdx + 1) * BK only to the global-memory address; index shared A/B with local k4..k4+3",
+            {"expressions": bad[:8]},
+        )
+    return make_result("GEMM_SHARED_TILE_INDICES_ARE_LOCAL", "pass", "shared-memory tile indices remain local to the allocated tile.")
+
+
+def check_first_k_tile_is_accumulated(code: str) -> dict[str, Any]:
+    for body in extract_if_bodies(code, r"bkIdx\s*==\s*0"):
+        initializes_fragment = bool(re.search(r"\breg[MN]\s*\[", body))
+        accumulates = bool(re.search(r"\b(?:results|acc)\s*\[[^\]]+\](?:\s*\[[^\]]+\])?\s*\+=", body))
+        if initializes_fragment and not accumulates:
+            return make_result(
+                "GEMM_FIRST_K_TILE_IS_ACCUMULATED", "fail",
+                "the bkIdx == 0 branch initializes a register fragment but performs no multiply-accumulate, dropping the first K tile.",
+                "GEMM.Semantic.FirstKTileDropped",
+                "run the same BK-wide multiply-accumulate for tile zero, using the prefetched A values only as a load substitution",
+            )
+    return make_result("GEMM_FIRST_K_TILE_IS_ACCUMULATED", "pass", "no control-flow pattern that drops the first K tile was detected.")
+
+
+def check_cta_swizzle_preserves_grid_extent(code: str) -> dict[str, Any]:
+    changes_grid_extent = bool(
+        re.search(r"grid_x_orig\s*=\s*CEIL_DIV\s*\(\s*N\s*,\s*BN\s*\)", code)
+        and re.search(r"\bgrid_x\s*=\s*[^;]*(?:grid_x_orig\s*&|grid_x_orig\s*<<|grid_x_orig\s*>>)[^;]*;", code)
+        and re.search(r"dim3\s+blocksPerGrid\s*\(\s*grid_x\s*,", code)
+    )
+    if changes_grid_extent:
+        return make_result(
+            "GEMM_CTA_SWIZZLE_PRESERVES_GRID_EXTENT", "fail",
+            "CTA swizzle transforms gridDim.x itself, changing the number of launched CTAs.",
+            "GEMM.Semantic.CTASwizzleChangesGridExtent",
+            "launch CEIL_DIV(N, BN) by CEIL_DIV(M, BM) CTAs and apply a bijective mapping to blockIdx inside the kernel",
+        )
+    return make_result("GEMM_CTA_SWIZZLE_PRESERVES_GRID_EXTENT", "pass", "CTA scheduling does not alter the required grid extent.")
+
+
+def check_store_bounds_use_global_coordinates(content: str, code: str) -> dict[str, Any]:
+    store = strip_cpp_comments(region_between_markers(content, "STORE_BEGIN", "STORE_END"))
+    if not store:
+        return make_result("GEMM_STORE_BOUNDS_USE_GLOBAL_COORDINATES", "pass", "store region is unavailable; check deferred.")
+    has_block_offsets = "C_offset" in store or bool(re.search(r"\b(?:tile_m0|blockIdx\.y\s*\*\s*BM)\b", store))
+    dimension_guards = [item for item in extract_if_conditions(store) if re.search(r"<\s*M\b", item) and re.search(r"<\s*N\b", item)]
+    guard_is_global = any(re.search(r"tile_m0|tile_n0|blockIdx|global_[mn]\b", item) for item in dimension_guards)
+    if has_block_offsets and dimension_guards and not guard_is_global:
+        return make_result(
+            "GEMM_STORE_BOUNDS_USE_GLOBAL_COORDINATES", "fail",
+            "C address includes the block offset, but its M/N bounds check uses only block-local coordinates.",
+            "GEMM.Semantic.OutputBoundaryGuardUsesLocalCoordinates",
+            "form global_m = tile_m0 + local_m and global_n = tile_n0 + local_n; use them for both the bounds guard and C index",
+        )
+    return make_result("GEMM_STORE_BOUNDS_USE_GLOBAL_COORDINATES", "pass", "output bounds are global or no conflicting local-only guard was detected.")
+
+
+def extract_if_bodies(code: str, condition_pattern: str) -> list[str]:
+    bodies: list[str] = []
+    for match in re.finditer(r"if\s*\(\s*" + condition_pattern + r"\s*\)\s*\{", code):
+        brace = code.find("{", match.start())
+        depth = 0
+        for index in range(brace, len(code)):
+            if code[index] == "{":
+                depth += 1
+            elif code[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    bodies.append(code[brace + 1:index])
+                    break
+    return bodies
+
+
+def extract_if_conditions(code: str) -> list[str]:
+    conditions: list[str] = []
+    for match in re.finditer(r"\bif\s*\(", code):
+        start = code.find("(", match.start())
+        depth = 0
+        for index in range(start, len(code)):
+            if code[index] == "(":
+                depth += 1
+            elif code[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    conditions.append(code[start + 1:index])
+                    break
+    return conditions
 
 
 def check_no_scalar_fallback_mixed_with_optimized_regions(content: str, code: str) -> dict[str, Any]:
@@ -235,19 +385,18 @@ def check_warp_lane_fragment_coverage(code: str, launch_config: dict[str, int], 
 def check_register_accumulator_coverage(code: str, tm: int | None, tn: int | None) -> dict[str, Any]:
     if not tm or not tn or tm * tn <= 1:
         return make_result("GEMM_REGISTER_ACCUMULATOR_COVERS_TM_TN", "pass", "scalar accumulator coverage is sufficient.")
-    has_2d_acc = bool(re.search(r"\bfloat\s+acc\s*\[\s*TM\s*\]\s*\[\s*TN\s*\]", code))
-    has_init_loops = has_loop_bound(code, "TM") and has_loop_bound(code, "TN") and bool(re.search(r"acc\s*\[[^\]]+\]\s*\[[^\]]+\]\s*=\s*0\.0f", code))
-    has_compute_loops = has_loop_bound(code, "TM") and has_loop_bound(code, "TN") and bool(re.search(r"acc\s*\[[^\]]+\]\s*\[[^\]]+\]\s*\+=", code))
-    if has_2d_acc and has_init_loops and has_compute_loops:
-        return make_result("GEMM_REGISTER_ACCUMULATOR_COVERS_TM_TN", "pass", "2D accumulator is initialized and accumulated over TM/TN.")
-    has_results_tile = bool(re.search(r"\bfloat\s+results\s*\[[^\]]+\]\s*\[[^\]]+\]\s*=\s*\{\s*0\.0f\s*\}", code))
-    has_results_compute = bool(re.search(r"\bresults\s*\[[^\]]+\]\s*\[[^\]]+\]\s*\+=", code))
-    has_register_fragments = "regM" in code and "regN" in code
-    if has_results_tile and has_results_compute and has_register_fragments:
+    accumulator_candidates = find_2d_float_accumulator_candidates(code)
+    valid_candidates = [
+        item
+        for item in accumulator_candidates
+        if item["initialized"] and item["accumulated"]
+    ]
+    if valid_candidates:
         return make_result(
             "GEMM_REGISTER_ACCUMULATOR_COVERS_TM_TN",
             "pass",
-            "warp/lane results tile is initialized and accumulated through regM/regN fragments.",
+            "a 2D register accumulator tile is initialized and accumulated over the thread tile.",
+            detail={"accumulators": valid_candidates[:4]},
         )
     return make_result(
         "GEMM_REGISTER_ACCUMULATOR_COVERS_TM_TN",
@@ -255,19 +404,40 @@ def check_register_accumulator_coverage(code: str, tm: int | None, tn: int | Non
         "register accumulator shape exists, but compute does not cover every TM/TN accumulator element.",
         "GEMM.Semantic.RegisterTileComputeIncomplete",
         "compute all acc[tm][tn] values inside nested TM/TN loops or explicit unrolled equivalents",
-        {"has_2d_acc": has_2d_acc, "has_init_loops": has_init_loops, "has_compute_loops": has_compute_loops},
+        {"accumulators": accumulator_candidates[:8], "has_tm_loop": has_loop_bound(code, "TM"), "has_tn_loop": has_loop_bound(code, "TN")},
     )
 
 
 def check_k_loop_updates_A_and_B_tiles(code: str) -> dict[str, Any]:
-    k_loop = extract_first_loop_body(code, r"for\s*\(\s*int\s+k\s*=\s*0\s*;\s*k\s*<\s*K\s*;\s*k\s*\+=\s*BK\s*\)")
-    if not k_loop and re.search(r"for\s*\(\s*int\s+bkIdx\s*=\s*1\s*;\s*bkIdx\s*<\s*k_tiles\s*;", code):
+    k_tile_loops = extract_k_tile_loop_bodies(code)
+    shared_names = shared_array_names(code)
+    for loop in k_tile_loops:
+        body = loop["body"]
+        loop_var = loop["var"]
+        k_dependent_load = code_segment_has_k_tile_dependency(body, loop_var)
+        updates_a = shared_assignment_from_global(body, shared_names, "A") and k_dependent_load
+        updates_b = shared_assignment_from_global(body, shared_names, "B") and k_dependent_load
+        direct_global_compute = bool(
+            not shared_names
+            and re.search(r"\bA\s*\[", body)
+            and re.search(r"\bB\s*\[", body)
+            and re.search(r"\b(?:acc|results|\w+)\s*\[[^\]]+\](?:\s*\[[^\]]+\])?\s*\+=", body)
+        )
+        if (updates_a and updates_b) or direct_global_compute:
+            return make_result(
+                "GEMM_K_LOOP_UPDATES_A_AND_B_TILES",
+                "pass",
+                "K-tile loop updates the A/B data used by compute.",
+                detail={"loop_var": loop_var, "updates_a": updates_a, "updates_b": updates_b},
+            )
+
+    if not k_tile_loops and re.search(r"for\s*\(\s*int\s+bkIdx\s*=\s*1\s*;\s*bkIdx\s*<\s*k_tiles\s*;", code):
         has_ping_pong_load = bool(
             "comp_flag" in code
             and "mem_flag" in code
             and re.search(r"\bbkIdx\s*\*\s*BK", code)
-            and re.search(r"\bAs\s*\[\s*mem_flag\s*\]", code)
-            and re.search(r"\bBs\s*\[\s*mem_flag\s*\]", code)
+            and shared_assignment_from_global(code, shared_names, "A")
+            and shared_assignment_from_global(code, shared_names, "B")
         )
         if has_ping_pong_load:
             return make_result(
@@ -275,29 +445,31 @@ def check_k_loop_updates_A_and_B_tiles(code: str) -> dict[str, Any]:
                 "pass",
                 "double-buffered bkIdx loop updates both A and B tile data.",
             )
-    if not k_loop:
+    if not k_tile_loops:
         return make_result(
             "GEMM_K_LOOP_UPDATES_A_AND_B_TILES",
             "fail",
             "optimized GEMM must have a K loop advancing by BK.",
             "GEMM.Semantic.KLoopMissing",
-            "add a for (int k = 0; k < K; k += BK) loop around shared loads and compute",
+            "add a K-tile loop advancing by BK around shared loads and compute",
         )
-    k_dependent_load = bool(
-        re.search(r"\bglobal_k\s*=\s*k\s*\+", k_loop)
-        or re.search(r"OFFSET\s*\([^)]*\b(?:k|global_k|local_k|k_inner)\b", k_loop)
-    )
-    updates_a = bool(re.search(r"\b(?:A_reg|As0|As1|As|shared_A|sA)\b[^=;]*=", k_loop) and k_dependent_load)
-    updates_b = bool(re.search(r"\b(?:Bs0|Bs1|Bs|shared_B|sB)\b[^=;]*=", k_loop) and k_dependent_load)
-    if updates_a and updates_b:
-        return make_result("GEMM_K_LOOP_UPDATES_A_AND_B_TILES", "pass", "K loop updates both A and B tile data.")
     return make_result(
         "GEMM_K_LOOP_UPDATES_A_AND_B_TILES",
         "fail",
         "K loop does not reload both A and B tiles for each BK slice.",
         "GEMM.Semantic.KLoopDataflowIncomplete",
         "move cooperative A/B tile loads into the K loop and index global memory with k + local_k",
-        {"updates_a": updates_a, "updates_b": updates_b},
+        {
+            "k_tile_loops": [
+                {
+                    "var": loop["var"],
+                    "updates_a": shared_assignment_from_global(loop["body"], shared_names, "A"),
+                    "updates_b": shared_assignment_from_global(loop["body"], shared_names, "B"),
+                    "k_dependent": code_segment_has_k_tile_dependency(loop["body"], loop["var"]),
+                }
+                for loop in k_tile_loops[:4]
+            ]
+        },
     )
 
 
@@ -402,23 +574,17 @@ def check_A_register_initialization(code: str, bk: int | None) -> dict[str, Any]
 def check_shared_memory_is_cooperatively_loaded(code: str, bm: int | None, bn: int | None, bk: int | None) -> dict[str, Any]:
     if "__shared__" not in code:
         return make_result("GEMM_SHARED_MEMORY_COOPERATIVE_LOAD", "pass", "shared memory is not used.")
+    shared_names = shared_array_names(code)
     shared_load_code = region_from_first_shared_store(code)
-    has_a_load = bool(re.search(r"\b(?:As0|As1|As|shared_A|sA)\s*\[[^\]]+\]", shared_load_code) and re.search(r"\bA\s*\[", shared_load_code))
-    has_b_load = bool(re.search(r"\b(?:Bs0|Bs1|Bs|shared_B|sB)\s*\[[^\]]+\]", shared_load_code) and re.search(r"\bB\s*\[", shared_load_code))
-    has_thread_strided_loop = bool(
-        re.search(r"for\s*\([^)]*=\s*(?:tid|sgpo_linear_tid)[^;]*;[^;]*<[^;]*;[^)]*\+=\s*(?:blockDim\.x|sgpo_thread_count|thread_count)", code)
-    )
+    has_a_load = shared_assignment_from_global(shared_load_code or code, shared_names, "A")
+    has_b_load = shared_assignment_from_global(shared_load_code or code, shared_names, "B")
+    has_thread_strided_loop = has_thread_cooperative_load_pattern(code)
     suspicious_per_thread_whole_tile = bool(re.search(r"for\s*\([^)]*<\s*BN[^)]*\)\s*\{[^{}]*for\s*\([^)]*<\s*BK", code, flags=re.DOTALL))
     has_vector_thread_mapped_load = bool(
         "FLOAT4" in code
-        and "load_a_smem_m" in code
-        and "load_a_smem_k" in code
-        and "load_b_smem_k" in code
-        and "load_b_smem_n" in code
-        and "As[" in code
-        and "Bs[" in code
-        and "A[OFFSET" in code
-        and "B[OFFSET" in code
+        and has_a_load
+        and has_b_load
+        and has_thread_derived_index(code)
     )
     if has_a_load and has_b_load and (has_thread_strided_loop or has_vector_thread_mapped_load) and not suspicious_per_thread_whole_tile:
         return make_result("GEMM_SHARED_MEMORY_COOPERATIVE_LOAD", "pass", "A/B shared tiles are cooperatively loaded.")
@@ -437,7 +603,63 @@ def check_shared_memory_is_cooperatively_loaded(code: str, bm: int | None, bn: i
             "has_thread_strided_loop": has_thread_strided_loop,
             "has_vector_thread_mapped_load": has_vector_thread_mapped_load,
             "suspicious_per_thread_whole_tile": suspicious_per_thread_whole_tile,
+            "shared_arrays": shared_names,
         },
+    )
+
+
+def check_vector_shared_load_mapping_bounds(code: str, launch_config: dict[str, int]) -> dict[str, Any]:
+    if "__shared__" not in code or "FLOAT4" not in code:
+        return make_result(
+            "GEMM_VECTOR_SHARED_LOAD_MAPPING_BOUNDED",
+            "pass",
+            "vectorized shared-memory loading is not used.",
+        )
+    required = ("BM", "BN", "BK", "WM", "WN")
+    if any(int_value(launch_config.get(name)) is None for name in required):
+        return make_result(
+            "GEMM_VECTOR_SHARED_LOAD_MAPPING_BOUNDED",
+            "pass",
+            "launch constants are incomplete; vector load bound check is deferred.",
+        )
+
+    bm, bn, bk, wm, wn = (int(launch_config[name]) for name in required)
+    threads = (bm // wm) * (bn // wn) * 32 if wm > 0 and wn > 0 else 0
+    hazards = []
+    legacy_a_names = re.findall(
+        r"\b(load_a\w*m)\s*=\s*(?:tid|threadIdx\.x)\s*/\s*\(\s*BK\s*/\s*4\s*\)", code
+    )
+    legacy_b_names = re.findall(
+        r"\b(load_b\w*k)\s*=\s*(?:tid|threadIdx\.x)\s*/\s*\(\s*BN\s*/\s*4\s*\)", code
+    )
+    a_guarded = bool(legacy_a_names) and all(has_upper_bound_guard(code, name, "BM") for name in legacy_a_names)
+    b_guarded = bool(legacy_b_names) and all(has_upper_bound_guard(code, name, "BK") for name in legacy_b_names)
+    if legacy_a_names and not a_guarded and threads > bm * (bk // 4):
+        hazards.append({"operand": "A", "threads": threads, "vector_tasks": bm * (bk // 4)})
+    if legacy_b_names and not b_guarded and threads > bk * (bn // 4):
+        hazards.append({"operand": "B", "threads": threads, "vector_tasks": bk * (bn // 4)})
+    if not hazards:
+        return make_result(
+            "GEMM_VECTOR_SHARED_LOAD_MAPPING_BOUNDED",
+            "pass",
+            "vectorized shared-memory load indices are bounded by tile task counts.",
+        )
+    return make_result(
+        "GEMM_VECTOR_SHARED_LOAD_MAPPING_BOUNDED",
+        "fail",
+        "thread-derived vector load coordinates can exceed the shared-memory tile when the block has more threads than vector load tasks.",
+        "GEMM.Semantic.SharedLoadThreadMappingOutOfBounds",
+        "use a flattened loop such as for (loadIdx = tid * 4; loadIdx < tile_elements; loadIdx += blockDim.x * 4), then derive local row/column coordinates from loadIdx",
+        {"hazards": hazards, "launch_config": {name: launch_config[name] for name in required}},
+    )
+
+
+def has_upper_bound_guard(code: str, variable: str, upper_bound: str) -> bool:
+    return bool(
+        re.search(
+            rf"\bif\s*\([^)]*\b{re.escape(variable)}\b\s*<\s*{re.escape(upper_bound)}\b[^)]*\)",
+            code,
+        )
     )
 
 
@@ -477,8 +699,9 @@ def check_shared_memory_is_used_by_compute(code: str) -> dict[str, Any]:
     compute_regions = "\n".join(re.findall(r"COMPUTE_INNER_BEGIN(.*?)COMPUTE_INNER_END", code, flags=re.DOTALL))
     if not compute_regions:
         compute_regions = code
-    uses_a_shared = bool(re.search(r"\b(?:As0|As1|As|shared_A|sA)\s*\[", compute_regions))
-    uses_b_shared = bool(re.search(r"\b(?:Bs0|Bs1|Bs|shared_B|sB)\s*\[", compute_regions))
+    shared_names = shared_array_names(code)
+    uses_a_shared = bool(re.search(shared_access_regex(shared_names_matching(shared_names, "A")), compute_regions))
+    uses_b_shared = bool(re.search(shared_access_regex(shared_names_matching(shared_names, "B")), compute_regions))
     if uses_a_shared and uses_b_shared:
         return make_result("GEMM_SHARED_MEMORY_USED_IN_COMPUTE", "pass", "compute consumes both shared A and shared B tiles.")
     return make_result(
@@ -642,10 +865,179 @@ def extract_first_loop_body(code: str, loop_pattern: str) -> str:
 
 
 def region_from_first_shared_store(code: str) -> str:
-    match = re.search(r"\b(?:As0|As1|As|Bs0|Bs1|Bs|shared_A|shared_B|sA|sB)\s*\[[^\]]+\]", code)
+    match = re.search(shared_access_regex(shared_array_names(code)), code)
     if not match:
         return ""
     return code[match.start():match.start() + 5000]
+
+
+def find_2d_float_accumulator_candidates(code: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    pattern = re.compile(
+        rf"\bfloat\s+({IDENTIFIER})\s*(\[[^\]]+\]\s*\[[^\]]+\])\s*(=\s*\{{[^;]*\}})?\s*;"
+    )
+    for match in pattern.finditer(code):
+        line_start = code.rfind("\n", 0, match.start()) + 1
+        line_prefix = code[line_start:match.start()]
+        if "__shared__" in line_prefix:
+            continue
+        name = match.group(1)
+        escaped = re.escape(name)
+        initialized = bool(match.group(3)) or bool(
+            re.search(
+                rf"\b{escaped}\s*\[[^\]]+\]\s*\[[^\]]+\]\s*=\s*(?:0|0\.0f|0\.0|0\.f)\b",
+                code,
+            )
+        )
+        accumulated = bool(re.search(rf"\b{escaped}\s*\[[^\]]+\]\s*\[[^\]]+\]\s*\+=", code))
+        stored = bool(
+            re.search(
+                rf"\bC\s*\[[^\]]+\]\s*=[^;]*\b{escaped}\s*\[[^\]]+\]\s*\[[^\]]+\]",
+                code,
+                flags=re.DOTALL,
+            )
+        )
+        candidates.append(
+            {
+                "name": name,
+                "shape": match.group(2),
+                "initialized": initialized,
+                "accumulated": accumulated,
+                "stored": stored,
+                "declaration": match.group(0),
+            }
+        )
+    return candidates
+
+
+def shared_array_names(code: str) -> list[str]:
+    names = set(
+        re.findall(
+            rf"__shared__\s+(?:__align__\s*\([^)]*\)\s*)?(?:float|float4|half|__half|double)\s+({IDENTIFIER})\s*\[",
+            code,
+        )
+    )
+    for fallback in ("As0", "As1", "Bs0", "Bs1", "As", "Bs", "shared_A", "shared_B", "sA", "sB"):
+        if re.search(rf"\b{re.escape(fallback)}\s*\[", code):
+            names.add(fallback)
+    return sorted(names)
+
+
+def shared_names_matching(names: list[str], tensor: str) -> list[str]:
+    target = tensor.upper()
+    matched: list[str] = []
+    for name in names:
+        compact = name.replace("_", "").upper()
+        if target == "A" and ("A" in compact or compact.endswith("AS") or compact.startswith("SA")):
+            matched.append(name)
+        elif target == "B" and ("B" in compact or compact.endswith("BS") or compact.startswith("SB")):
+            matched.append(name)
+    return matched or names
+
+
+def shared_access_regex(names: list[str]) -> str:
+    if not names:
+        return r"a^"
+    alternatives = "|".join(re.escape(name) for name in names)
+    return rf"\b(?:{alternatives})\s*(?:\[[^\]]+\])+"
+
+
+def shared_assignment_from_global(code: str, shared_names: list[str], global_name: str) -> bool:
+    matching_names = shared_names_matching(shared_names, global_name)
+    shared_access = shared_access_regex(matching_names)
+    global_access = rf"\b{re.escape(global_name)}\s*\["
+    shared_lhs = rf"(?:FLOAT4\s*\(\s*)?{shared_access}(?:\s*\))?\s*="
+    if re.search(shared_lhs + rf"[^;]*{global_access}", code, flags=re.DOTALL):
+        return True
+    temp_loads = re.findall(
+        rf"\b(?:float4|float|auto)\s+({IDENTIFIER})\s*=\s*(?:FLOAT4\s*\(\s*)?[^;]*{global_access}[^;]*;",
+        code,
+        flags=re.DOTALL,
+    )
+    for temp_name in temp_loads:
+        if re.search(shared_lhs + rf"[^;]*\b{re.escape(temp_name)}\b(?:\.[xyzw])?", code, flags=re.DOTALL):
+            return True
+    return False
+
+
+def has_thread_derived_index(code: str) -> bool:
+    return bool(re.search(r"\b(?:tid|threadIdx\.x|sgpo_linear_tid|lane)\b", code))
+
+
+def has_thread_cooperative_load_pattern(code: str) -> bool:
+    thread_symbol = r"(?:tid|threadIdx\.x|sgpo_linear_tid|lane)"
+    thread_count = r"(?:blockDim\.x|sgpo_thread_count|thread_count|threads_per_block)"
+    load_idx_loop = re.search(
+        rf"for\s*\([^)]*=\s*{thread_symbol}[^;]*;[^;]*;[^)]*\+=\s*{thread_count}\s*\)",
+        code,
+    )
+    thread_offset = re.search(
+        rf"(?:\+|\-|\*|/|%)\s*{thread_symbol}\b|\b{thread_symbol}\s*(?:\+|\-|\*|/|%)",
+        code,
+    )
+    if load_idx_loop or thread_offset and re.search(rf"for\s*\([^)]*;[^;]*<[^;]*;[^)]*\+=", code):
+        return True
+
+    derived_vars = thread_derived_index_names(code)
+    for match in re.finditer(rf"for\s*\([^)]*;[^;]*<[^;]*;[^)]*\+=\s*(?:{thread_count}|{IDENTIFIER})\s*\)", code):
+        body = extract_loop_body_from_match(code, match)
+        if body and any(re.search(rf"\b{re.escape(name)}\b", body) for name in derived_vars):
+            return True
+    return False
+
+
+def thread_derived_index_names(code: str) -> set[str]:
+    names: set[str] = set()
+    thread_symbol = r"(?:tid|threadIdx\.x|sgpo_linear_tid|lane)"
+    for name, expression in re.findall(rf"\b(?:const\s+)?int\s+({IDENTIFIER})\s*=\s*([^;]*{thread_symbol}[^;]*);", code):
+        names.add(name)
+    return names
+
+
+def code_segment_has_k_tile_dependency(segment: str, loop_var: str) -> bool:
+    var = re.escape(loop_var)
+    return bool(
+        re.search(rf"\bglobal_k\s*=\s*[^;]*\b{var}\b", segment)
+        or re.search(rf"\b{var}\b\s*(?:\+|\-|\*|/|%)\s*(?:BK|{IDENTIFIER})", segment)
+        or re.search(rf"(?:BK|{IDENTIFIER})\s*(?:\+|\-|\*|/|%)\s*\b{var}\b", segment)
+        or re.search(rf"OFFSET\s*\([^;]*\b{var}\b", segment, flags=re.DOTALL)
+        or re.search(rf"\b[AB]\s*\[[^;]*\b{var}\b", segment, flags=re.DOTALL)
+    )
+
+
+def extract_k_tile_loop_bodies(code: str) -> list[dict[str, str]]:
+    loops: list[dict[str, str]] = []
+    seen_offsets: set[int] = set()
+    patterns = [
+        rf"for\s*\(\s*(?:int|long|size_t)\s+(?P<var>{IDENTIFIER})\s*=\s*0\s*;\s*(?P=var)\s*<\s*K\s*;\s*(?:(?:\+\+\s*(?P=var))|(?:(?P=var)\s*\+\+)|(?:(?P=var)\s*\+=\s*BK)|(?:(?P=var)\s*=\s*(?P=var)\s*\+\s*BK))\s*\)",
+        rf"for\s*\(\s*(?:int|long|size_t)\s+(?P<var>{IDENTIFIER})\s*=\s*[01]\s*;\s*(?P=var)\s*<\s*k_tiles\s*;[^)]*\)",
+        rf"for\s*\(\s*(?:int|long|size_t)\s+(?P<var>{IDENTIFIER})\s*=\s*0\s*;\s*(?P=var)\s*<\s*CEIL_DIV\s*\(\s*K\s*,\s*BK\s*\)\s*;[^)]*\)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, code):
+            if match.start() in seen_offsets:
+                continue
+            body = extract_loop_body_from_match(code, match)
+            if body:
+                seen_offsets.add(match.start())
+                loops.append({"var": match.group("var"), "body": body, "header": match.group(0)})
+    return loops
+
+
+def extract_loop_body_from_match(code: str, match: re.Match[str]) -> str:
+    brace = code.find("{", match.end())
+    if brace < 0:
+        return ""
+    depth = 0
+    for index in range(brace, len(code)):
+        char = code[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return code[brace + 1:index]
+    return ""
 
 
 def get_path(data: dict[str, Any], path: str, default: Any = None) -> Any:

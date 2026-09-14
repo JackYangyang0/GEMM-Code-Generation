@@ -6,13 +6,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from SGPO.llm.base import LLMClient
+from SGPO.utils.execution import limited
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_SELECTION_TIMEOUT_SECONDS = 30
 DEFAULT_CODEGEN_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_RETRIES = 3
+DEFAULT_SELECTION_MAX_RETRIES = 1
 
 
 @dataclass(frozen=True)
@@ -44,7 +47,15 @@ class OpenAICompatibleClient(LLMClient):
             "codegen_timeout_seconds",
             default=max(DEFAULT_CODEGEN_TIMEOUT_SECONDS, self._timeout_seconds),
         )
+        self._selection_timeout_seconds = numeric_config(
+            config,
+            "selection_timeout_seconds",
+            default=min(DEFAULT_SELECTION_TIMEOUT_SECONDS, self._timeout_seconds),
+        )
         self._max_retries = int(config.get("max_retries", DEFAULT_MAX_RETRIES))
+        self._selection_max_retries = int(
+            config.get("selection_max_retries", min(DEFAULT_SELECTION_MAX_RETRIES, self._max_retries))
+        )
         self._client = OpenAI(
             api_key=api_key,
             base_url=config["base_url"],
@@ -60,6 +71,11 @@ class OpenAICompatibleClient(LLMClient):
     def codegen_timeout_seconds(self) -> float:
         return self._codegen_timeout_seconds
 
+    @property
+    def selection_timeout_seconds(self) -> float:
+        return self._selection_timeout_seconds
+
+    @limited("llm")
     def complete_text(self, messages: list[dict[str, str]], timeout_seconds: float | None = None) -> str:
         response = self._client.chat.completions.create(
             model=self._config["model"],
@@ -69,6 +85,7 @@ class OpenAICompatibleClient(LLMClient):
         )
         return response.choices[0].message.content or ""
 
+    @limited("llm")
     def complete_json(self, messages: list[dict[str, str]], timeout_seconds: float | None = None) -> dict[str, Any]:
         response = self._client.chat.completions.create(
             model=self._config["model"],
@@ -79,6 +96,19 @@ class OpenAICompatibleClient(LLMClient):
         )
         content = response.choices[0].message.content or "{}"
         logger.info("LLM response received: %d chars", len(content))
+        return extract_json_object(content)
+
+    @limited("llm")
+    def complete_selection_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        response = self._client.with_options(max_retries=self._selection_max_retries).chat.completions.create(
+            model=self._config["model"],
+            messages=messages,
+            temperature=self._config["temperature"],
+            response_format={"type": "json_object"},
+            timeout=self._selection_timeout_seconds,
+        )
+        content = response.choices[0].message.content or "{}"
+        logger.info("LLM selection response received: %d chars", len(content))
         return extract_json_object(content)
 
     def complete_codegen_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:

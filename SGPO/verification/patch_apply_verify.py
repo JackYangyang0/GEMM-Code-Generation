@@ -284,6 +284,15 @@ def summarize_verification(ir: dict[str, Any]) -> dict[str, Any]:
         "cuda_error": runtime_safety.get("cuda_error"),
         "latency_ms": performance.get("latency_ms"),
         "gflops": performance.get("gflops"),
+        "benchmark_runs": performance.get("benchmark_runs"),
+        "benchmark_successful_runs": performance.get("benchmark_successful_runs"),
+        "latency_ms_mean": performance.get("latency_ms_mean"),
+        "latency_ms_median": performance.get("latency_ms_median"),
+        "latency_ms_std": performance.get("latency_ms_std"),
+        "gflops_mean": performance.get("gflops_mean"),
+        "gflops_median": performance.get("gflops_median"),
+        "gflops_std": performance.get("gflops_std"),
+        "gflops_best": performance.get("gflops_best"),
     }
 
 

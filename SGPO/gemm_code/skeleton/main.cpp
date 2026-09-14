@@ -9,10 +9,14 @@
 #include "kernel.h"
 
 // cal offset from row col && ld , in row-major matrix, ld is the width of the matrix
+#ifndef OFFSET
 #define OFFSET(row, col, ld) ((row) * (ld) + (col))
+#endif
 
 // transfer float4
+#ifndef FLOAT4
 #define FLOAT4(pointer) (reinterpret_cast<float4*>(&(pointer))[0])
+#endif
 
 #define checkCudaErrors(func)                                                    \
 do {                                                                             \
@@ -34,7 +38,9 @@ do {                                                                            
     }                                                                            \
 } while (0)
 
+#ifndef CEIL_DIV
 #define CEIL_DIV(M, N) (((M) + (N)-1) / (N))
+#endif
 
 int main(int argc, char** argv) {
     if (argc != 4) {
@@ -90,8 +96,17 @@ int main(int argc, char** argv) {
     checkCudaErrors(cudaEventCreate(&stop));
     float msecTotal = 0;
     int nIter = 50;
+    int warmupIter = 5;
 
     checkCudaErrors(cudaMemcpy( d_C, h_C, bytes_C, cudaMemcpyHostToDevice));
+    for (int run = 0; run < warmupIter; run++) {
+        float alpha = 1.0f;
+        float beta = 0.0f;
+        cuda_gemm(M, N, K, alpha, d_A, d_B, beta, d_C);
+        checkCudaErrors(cudaGetLastError());
+    }
+    checkCudaErrors(cudaDeviceSynchronize());
+
     checkCudaErrors(cudaEventRecord(start));
     for (int run = 0 ; run < nIter; run ++ ) {
         float alpha = 1.0f;
@@ -114,14 +129,24 @@ int main(int argc, char** argv) {
     // cublas
     cublasHandle_t blas_handle = nullptr;
     checkCublasErrors(cublasCreate(&blas_handle));
+    checkCublasErrors(cublasSetMathMode(blas_handle, CUBLAS_PEDANTIC_MATH));
     float alpha = 1.0;
     float beta = 0;
-    checkCudaErrors(cudaMemcpy( d_C, h_C, bytes_C, cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemset(d_C, 0, bytes_C));
+    for (int run = 0; run < warmupIter; run++) {
+        checkCublasErrors(cublasSgemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+            N, M, K, &alpha,
+            d_B, N, d_A, K, &beta, d_C, N
+        ));
+    }
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    checkCudaErrors(cudaMemset(d_C, 0, bytes_C));
     checkCudaErrors(cudaEventRecord(start));
     for (int run = 0 ; run < nIter; run ++ ) {
-        checkCublasErrors(cublasSgemm(blas_handle, CUBLAS_OP_T, CUBLAS_OP_T,
-            M, N, K, &alpha, 
-            d_A, K, d_B, N, &beta, d_C, M
+        checkCublasErrors(cublasSgemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+            N, M, K, &alpha,
+            d_B, N, d_A, K, &beta, d_C, N
         ));
     }
     checkCudaErrors(cudaEventRecord(stop));
@@ -142,15 +167,13 @@ int main(int argc, char** argv) {
     double eps = 1.e-6;  // machine zero
     bool correct = true;
     for (int i = 0; i < M * N; i++) {
-        int row = i / N;
-        int col = i % N;
-        double abs_err = fabs(h_C[i] - h_C1[col * M + row]);
-        double dot_length = M;
+        double abs_err = fabs(h_C[i] - h_C1[i]);
+        double dot_length = K;
         double abs_val = fabs(h_C[i]);
         double rel_err = abs_err / abs_val / dot_length;
         if (rel_err > eps) {
             printf("Error! Matrix[%05d]=%.8f, ref=%.8f error term is > %E\n",
-                    i, h_C[i], h_C1[col * M + row], eps);
+                    i, h_C[i], h_C1[i], eps);
             correct = false;
             break;
         }
