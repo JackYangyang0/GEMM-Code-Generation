@@ -28,11 +28,19 @@ from SGPO.generate_ir.strategy_index_filter import (
     infer_stage_order_from_index,
 )
 from SGPO.generate_ir.strategy_library_merge import load_merged_strategy_documents
-from SGPO.generate_ir.stage_controller import StageController, synthesize_ir_updates
+from SGPO.generate_ir.stage_controller import (
+    StageController, synthesize_ir_updates, derive_fields,
+    choose_warp_iteration_extents, warp_iteration_is_valid,
+)
 from SGPO.generate_ir.gpu_resources import shared_memory_usage, shared_memory_limit, proposed_pipeline_bytes
 from SGPO.generate_ir.tiling_planner import (
     build_joint_tiling_candidates,
+    make_diverse_tiling_pool,
     tiling_plan_for_ir,
+)
+from SGPO.generate_ir.gpu_architecture import (
+    build_gpu_architecture_profile,
+    estimate_tiling_execution,
 )
 from SGPO.llm.openai_client import OpenAICompatibleClient
 from SGPO.llm.patch_generator import (
@@ -88,7 +96,7 @@ DEFAULT_DESCRIPTION = (
     # "I need to generate a high-performance CUDA GEMM implementation for "
     # "row-major fp32 NN GEMM. Matrix Size: (M:4096 N:4096 K:4096)."
     "I need to generate a high-performance CUDA GEMM implementation for the row master fp32 NN GEMM. "
-    "matrix size: (M: 512 N: 512 K: 512)."
+    "matrix size: (M: 1024 N: 1024 K: 1024)."
 )
 DEFAULT_IR_PATCH_DIR = ROOT / "data" / "IRs" / "ir_patch"
 DEFAULT_IR_OUTPUT = DEFAULT_IR_PATCH_DIR / "optir.extracted.json"
@@ -150,13 +158,17 @@ DEFAULT_MAX_REPAIR_ATTEMPTS = 3
 CORE_CONSTRUCTION_COUPLED_PROFILE = "core_construction_coupled"
 DEFAULT_STRATEGY_PROFILE = CORE_CONSTRUCTION_COUPLED_PROFILE
 DEFAULT_UNLOCKED_PERFORMANCE_PROFILE = "throughput_exploration"
-DEFAULT_SELECTION_MODE = "hierarchical_top3_lazy_fallback"
+DEFAULT_SELECTION_MODE = "architecture_aware_tiling_funnel"
 DEFAULT_MAX_FRONTIER_STATES_PER_STAGE = 3
 DEFAULT_SINGLE_PATH_MODE = False
 DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE = 3
 DEFAULT_TOP_K_FINAL_RESULTS = 3
 DEFAULT_TILING_TOP_K_PER_LEVEL = 3
-DEFAULT_CORE_CONSTRUCTION_FRONTIER_STATES = 3
+DEFAULT_TILING_RESOURCE_POOL_SIZE = 24
+DEFAULT_TILING_LLM_TOP_N = 9
+DEFAULT_PHASE1_FRONTIER_SIZE = 6
+DEFAULT_COMPILE_SHORTLIST_SIZE = 6
+DEFAULT_CORE_CONSTRUCTION_FRONTIER_STATES = DEFAULT_PHASE1_FRONTIER_SIZE
 DEFAULT_FIRST_PERFORMANCE_PRUNE_STAGE = "Tiling"
 DEFAULT_PRESERVE_TILING_LINEAGES = True
 DEFAULT_TOP_K_PER_TILING_LINEAGE = 1
@@ -437,6 +449,15 @@ def main() -> None:
     tiling_top_k_per_level = int(
         search_config.get("tiling_top_k_per_level", DEFAULT_TILING_TOP_K_PER_LEVEL) or 0
     )
+    tiling_resource_pool_size = int(
+        search_config.get("tiling_resource_pool_size", DEFAULT_TILING_RESOURCE_POOL_SIZE) or 0
+    )
+    tiling_llm_top_n = int(
+        search_config.get("tiling_llm_top_n", DEFAULT_TILING_LLM_TOP_N) or 0
+    )
+    compile_shortlist_size = int(
+        search_config.get("compile_shortlist_size", DEFAULT_COMPILE_SHORTLIST_SIZE) or 0
+    )
     core_construction_frontier_states = int(
         search_config.get("core_construction_frontier_states", DEFAULT_CORE_CONSTRUCTION_FRONTIER_STATES) or 0
     )
@@ -497,13 +518,8 @@ def main() -> None:
             core_limit=core_construction_frontier_states,
             first_performance_prune_stage=first_performance_prune_stage,
         )
-        use_tiling_lineage_beam = (
-            target_backend(current_ir) == "cuda"
-            and preserve_tiling_lineages
-            and (stage == "Tiling" or bool(tiling_lineage_keys(frontier)))
-        )
-        if use_tiling_lineage_beam and stage != "Tiling":
-            stage_frontier_limit = len(tiling_lineage_keys(frontier)) * top_k_per_tiling_lineage
+        # Stage survivors are a global budget, not a budget per BlockTile root.
+        use_tiling_lineage_beam = False
         stage_result = run_exhaustive_stage(
             stage=stage,
             frontier=frontier,
@@ -514,7 +530,7 @@ def main() -> None:
             user_question=user_question,
             profile=strategy_profile,
             max_frontier_states=stage_frontier_limit,
-            exhaust_pending=target_backend(current_ir) == "cuda" or stage == stage_order[-1],
+            exhaust_pending=False,
             build_platform=build_platform,
             compile_each_step=compile_each_step,
             compile_each_stage=compile_each_stage,
@@ -522,6 +538,8 @@ def main() -> None:
             stage_benchmark_runs=per_stage_benchmark_runs,
             stage_benchmark_warmup_runs=per_stage_benchmark_warmup_runs,
             tiling_top_k_per_level=tiling_top_k_per_level,
+            tiling_resource_pool_size=tiling_resource_pool_size,
+            tiling_llm_top_n=tiling_llm_top_n,
             preserve_tiling_lineages=use_tiling_lineage_beam,
             top_k_per_tiling_lineage=top_k_per_tiling_lineage,
             lazy_fallback_execution=lazy_fallback_execution,
@@ -538,8 +556,13 @@ def main() -> None:
             "reason": "Performance ranking is deferred until Phase 1 terminal verification.",
         }
 
+    terminal_input_states = build_phase1_compile_shortlist(
+        frontier,
+        terminal_fallback_states,
+        compile_shortlist_size,
+    )
     baseline_terminal_verification = verify_terminal_chains(
-        frontier=[*frontier, *terminal_fallback_states],
+        frontier=terminal_input_states,
         strategy_library=strategy_library,
         build_platform=build_platform,
         benchmark_runs=terminal_benchmark_runs,
@@ -633,9 +656,12 @@ def main() -> None:
         materialize_final_generated_files(code_root, final_source_snapshot, final_ir)
     save_json(Path(DEFAULT_EVOLUTION_OUTPUT), {
         "selection_mode": DEFAULT_SELECTION_MODE,
-        "tiling_hierarchical_search": {
-            "top_k_per_level": tiling_top_k_per_level,
-            "maximum_block_warp_thread_combinations": tiling_top_k_per_level ** 3,
+        "tiling_search_funnel": {
+            "resource_pool_size": tiling_resource_pool_size,
+            "llm_top_n": tiling_llm_top_n,
+            "phase1_frontier_size": max_frontier_states,
+            "compile_shortlist_size": compile_shortlist_size,
+            "final_benchmark_top_k": DEFAULT_TOP_K_FINAL_RESULTS,
         },
         "stage_order": stage_order,
         "strategy_profile": strategy_profile,
@@ -683,9 +709,12 @@ def main() -> None:
                 else None,
                 "evolution_output": str(Path(DEFAULT_EVOLUTION_OUTPUT)),
                 "selection_mode": DEFAULT_SELECTION_MODE,
-                "tiling_hierarchical_search": {
-                    "top_k_per_level": tiling_top_k_per_level,
-                    "maximum_block_warp_thread_combinations": tiling_top_k_per_level ** 3,
+                "tiling_search_funnel": {
+                    "resource_pool_size": tiling_resource_pool_size,
+                    "llm_top_n": tiling_llm_top_n,
+                    "phase1_frontier_size": max_frontier_states,
+                    "compile_shortlist_size": compile_shortlist_size,
+                    "final_benchmark_top_k": DEFAULT_TOP_K_FINAL_RESULTS,
                 },
                 "top_k_strategies_per_subphase": DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE,
                 "top_k_final_results": DEFAULT_TOP_K_FINAL_RESULTS,
@@ -1524,13 +1553,8 @@ def build_matrix_profile(ir: dict[str, Any]) -> dict[str, Any]:
     bm = int_or_default(tiling.get("block_m"), max(m, 1))
     bn = int_or_default(tiling.get("block_n"), max(n, 1))
     bk = int_or_default(tiling.get("block_k"), max(k, 1))
-    sm_count = int_or_default(
-        gpu.get("sm_count")
-        or gpu.get("multi_processor_count")
-        or gpu.get("multiprocessor_count")
-        or hw.get("sm_count"),
-        1,
-    )
+    execution_profile = build_gpu_architecture_profile(hw)
+    sm_count = int_or_default(execution_profile.get("sm_count"), 1)
     ops = 2 * m * n * k
     cta_count = ceil_div(m, bm) * ceil_div(n, bn)
     k_tiles = ceil_div(k, bk)
@@ -1544,7 +1568,37 @@ def build_matrix_profile(ir: dict[str, Any]) -> dict[str, Any]:
         estimate_registers_per_thread(ir),
     )
     cta_per_sm = float(cta_count) / float(max(sm_count, 1))
-    large_mn = cta_count >= 2 * sm_count and ops >= 2**33
+    mapping = ir.get("mapping", {}) or {}
+    threads_per_block = int_or_default(mapping.get("threads_per_block"), 0)
+    warps_per_block = int_or_default(mapping.get("warps_per_block"), 0)
+    if not warps_per_block and threads_per_block:
+        warps_per_block = ceil_div(threads_per_block, int_or_default(execution_profile.get("warp_size"), 32))
+    execution_estimate = {}
+    if threads_per_block and warps_per_block and bm and bn and bk:
+        dtype = str(problem.get("dtype") or problem.get("dtype_A") or "fp32").lower()
+        element_bytes = 2 if "16" in dtype or "bf16" in dtype else 8 if "64" in dtype else 4
+        execution_estimate = estimate_tiling_execution(
+            problem,
+            execution_profile,
+            bm=bm,
+            bn=bn,
+            bk=bk,
+            threads_per_block=threads_per_block,
+            warps_per_block=warps_per_block,
+            shared_memory_bytes=shared_memory_bytes,
+            estimated_registers_per_thread=estimated_registers,
+            element_bytes=element_bytes,
+            estimated_accumulators_per_thread=int_or_default(
+                get_nested_value(ir, "resource.tiling_candidate.estimated_accumulators_per_thread"),
+                int_or_default(tiling.get("thread_m"), 1) * int_or_default(tiling.get("thread_n"), 1),
+            ),
+        )
+    cta_waves = execution_estimate.get("cta_waves") if execution_estimate else None
+    # A square 1024 FP32 GEMM is already throughput-oriented on a many-SM GPU.
+    # The old 2^33 threshold classified it as medium and hid all L2/scheduling
+    # candidates from the unlock phase.
+    throughput_sized_mn = min(m, n) >= 1024 and ops >= 2**31
+    large_mn = throughput_sized_mn or (cta_count >= 2 * sm_count and ops >= 2**33)
     large_k = k_tiles >= 128 or k >= 4096
     return {
         "M": m,
@@ -1557,7 +1611,10 @@ def build_matrix_profile(ir: dict[str, Any]) -> dict[str, Any]:
         "cta_count": cta_count,
         "k_tiles": k_tiles,
         "sm_count": sm_count,
+        "architecture_family": execution_profile.get("architecture_family"),
+        "execution_profile": execution_profile,
         "cta_per_sm": cta_per_sm,
+        "cta_waves": cta_waves,
         "shared_memory_bytes": shared_memory_bytes,
         "shared_memory_per_stage_bytes": shared_usage["per_stage_bytes"],
         "pipeline_stage_count": shared_usage["stage_count"],
@@ -1567,6 +1624,7 @@ def build_matrix_profile(ir: dict[str, Any]) -> dict[str, Any]:
         "large_mn": large_mn,
         "large_k": large_k,
         "large": large_mn or large_k,
+        "execution_estimate": execution_estimate,
     }
 
 
@@ -1770,6 +1828,7 @@ def sanitize_unlock_batch_plan(
             for other in cleaned_batches:
                 if other is not batch and required in other["strategy_ids"]:
                     other["strategy_ids"].remove(required)
+    ensure_async_pipeline_exploration_batch(cleaned_batches, valid_by_id, matrix_profile, applied)
     executor_id = "Compiler.ResourceFeedback.PtxasOccupancySweep"
     executor_selected = any(executor_id in batch["strategy_ids"] for batch in cleaned_batches)
     for batch in cleaned_batches:
@@ -1784,6 +1843,44 @@ def sanitize_unlock_batch_plan(
         "matrix_profile": matrix_profile,
         "sanitized": True,
     }
+
+
+def ensure_async_pipeline_exploration_batch(
+    batches: list[dict[str, Any]],
+    valid_by_id: dict[str, dict[str, Any]],
+    matrix_profile: dict[str, Any],
+    applied: set[str],
+) -> None:
+    """Schedule a guarded async-copy replacement for long synchronous K loops."""
+    if "Pipeline.NoAsyncCopy.V1" not in applied:
+        return
+    if int_or_default(matrix_profile.get("k_tiles"), 0) < 32:
+        return
+    selected = {strategy_id for batch in batches for strategy_id in batch.get("strategy_ids", [])}
+    if any(strategy_id.startswith("Pipeline.CpAsync.") for strategy_id in selected):
+        return
+    preferred_ids = (
+        "Pipeline.CpAsync.Multistage3.SharedAB",
+        "Pipeline.CpAsync.Multistage2.SharedAB",
+        "Pipeline.CpAsync.Multistage4.SharedAB",
+    )
+    strategy_id = next((item for item in preferred_ids if item in valid_by_id), None)
+    if strategy_id is None:
+        return
+    required = list(valid_by_id[strategy_id].get("requires_bundle_strategy_ids", []) or [])
+    for batch in batches:
+        batch["strategy_ids"] = [item for item in batch.get("strategy_ids", []) if item not in required]
+    batches.append(
+        {
+            "batch_id": "async_pipeline_upgrade",
+            "purpose": "replace synchronous shared-memory loading with an async pipeline",
+            "strategy_ids": append_unique(required, [strategy_id]),
+            "coupling_reason": "NoAsyncCopy is superseded for a long K reduction",
+            "requires_summary": ["compile, correctness and runtime gates remain mandatory"],
+            "risk": "high",
+            "filtered_out": [],
+        }
+    )
 
 
 def fallback_unlock_batches(strategies: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1914,6 +2011,7 @@ def build_unlock_code_summary(
                 "INDEX_MAPPING",
                 "REGISTER_DECL",
                 "GLOBAL_TO_SHARED_LOAD",
+        "NEXT_TILE_LOAD",
                 "SYNC_AFTER_LOAD",
                 "MAIN_LOOP",
                 "COMPUTE_INNER",
@@ -2416,6 +2514,8 @@ def run_stage(
     stage_benchmark_runs: int = DEFAULT_STAGE_BENCHMARK_RUNS,
     stage_benchmark_warmup_runs: int = DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS,
     tiling_top_k_per_level: int = DEFAULT_TILING_TOP_K_PER_LEVEL,
+    tiling_resource_pool_size: int = DEFAULT_TILING_RESOURCE_POOL_SIZE,
+    tiling_llm_top_n: int = DEFAULT_TILING_LLM_TOP_N,
     lazy_fallback_execution: bool = DEFAULT_LAZY_FALLBACK_EXECUTION,
 ) -> dict[str, Any]:
     compile_each_step = False
@@ -2527,18 +2627,16 @@ def run_stage(
         "Tiling.ThreadTileSelection",
     }
     micro_selection = None
-    if target_backend(current_ir) == "cuda" and current_subphase_id in hierarchical_tiling_subphases:
+    if target_backend(current_ir) == "cuda" and current_subphase_id == "Tiling.BlockTileSelection":
         try:
-            micro_selection = get_micro_strategy_from_llm(
+            micro_selection = build_joint_tiling_micro_selection(
                 client=client,
-                current_stage=stage,
-                current_subphase=current_subphase_id,
-                subphase=current_subphase or {},
-                optir_summary=compact_hierarchical_tiling_ir_summary(current_ir),
-                strategy_index=available_strategy_index,
-                prompt_path=Path(DEFAULT_MICRO_STRATEGY_PROMPT),
+                current_ir=current_ir,
+                strategy_library=strategy_library,
+                available_strategy_index=available_strategy_index,
+                top_k=tiling_llm_top_n,
+                resource_pool_size=tiling_resource_pool_size,
             )
-            micro_selection["selection_mode"] = "hierarchical_tiling_llm_selection"
         except Exception as exc:
             error = {
                 "stage": stage,
@@ -2556,13 +2654,27 @@ def run_stage(
                 "summary": {
                     "stage": stage,
                     "current_subphase": current_subphase_id,
-                    "selection_mode": "hierarchical_tiling_llm_selection_failed",
+                    "selection_mode": "joint_tiling_llm_selection_failed",
                     "filtered_strategy_count": available_strategy_index.get("strategy_count", 0),
                     "accepted_candidate_count": 0,
                     "selection_error": error,
                     "chain_record": chain_record,
                 },
             }
+    elif target_backend(current_ir) == "cuda" and current_subphase_id in {
+        "Tiling.WarpTileSelection", "Tiling.ThreadTileSelection"
+    }:
+        micro_selection = planned_tiling_micro_selection(
+            current_ir,
+            current_subphase_id,
+            available_strategy_index,
+        )
+        if micro_selection is None:
+            micro_selection = build_fallback_micro_selection(
+                available_strategy_index,
+                current_subphase_id,
+                "joint Tiling plan was unavailable; use filtered deterministic fallback",
+            )
     else:
         if micro_selection is None:
             try:
@@ -2588,8 +2700,10 @@ def run_stage(
             profile,
         )
     subphase_top_k = 1 if current_subphase_id == "Tiling.MappingDerivation" else (
-        tiling_top_k_per_level
-        if current_subphase_id in hierarchical_tiling_subphases
+        tiling_llm_top_n
+        if current_subphase_id == "Tiling.BlockTileSelection"
+        else 1
+        if current_subphase_id in {"Tiling.WarpTileSelection", "Tiling.ThreadTileSelection"}
         else DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE
     )
     execution_candidates = select_top_k_candidates(
@@ -2805,6 +2919,8 @@ def run_exhaustive_stage(
     stage_benchmark_runs: int = DEFAULT_STAGE_BENCHMARK_RUNS,
     stage_benchmark_warmup_runs: int = DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS,
     tiling_top_k_per_level: int = DEFAULT_TILING_TOP_K_PER_LEVEL,
+    tiling_resource_pool_size: int = DEFAULT_TILING_RESOURCE_POOL_SIZE,
+    tiling_llm_top_n: int = DEFAULT_TILING_LLM_TOP_N,
     preserve_tiling_lineages: bool = False,
     top_k_per_tiling_lineage: int = DEFAULT_TOP_K_PER_TILING_LINEAGE,
     lazy_fallback_execution: bool = DEFAULT_LAZY_FALLBACK_EXECUTION,
@@ -2869,6 +2985,8 @@ def run_exhaustive_stage(
                     stage_benchmark_runs=stage_benchmark_runs,
                     stage_benchmark_warmup_runs=stage_benchmark_warmup_runs,
                     tiling_top_k_per_level=tiling_top_k_per_level,
+                    tiling_resource_pool_size=tiling_resource_pool_size,
+                    tiling_llm_top_n=tiling_llm_top_n,
                     lazy_fallback_execution=lazy_fallback_execution,
                 )
         outcomes = parallel_chain_map(
@@ -3045,11 +3163,8 @@ def run_exhaustive_stage(
         )
     )
 
-    if not exhaust_pending and max_frontier_states > 0 and len(next_frontier) > max_frontier_states:
-        if preserve_tiling_lineages:
-            next_frontier = prune_frontier_per_tiling_lineage(next_frontier, top_k_per_tiling_lineage)
-        else:
-            next_frontier = sorted(next_frontier, key=frontier_state_score, reverse=True)[:max_frontier_states]
+    stage_candidate_count = len(next_frontier)
+    next_frontier, stage_pruned = select_stage_survivors(next_frontier, max_frontier_states)
 
     return {
         "frontier": next_frontier,
@@ -3062,6 +3177,13 @@ def run_exhaustive_stage(
             "selection_mode": DEFAULT_SELECTION_MODE,
             "input_frontier_count": len(frontier),
             "output_frontier_count": len(next_frontier),
+            "stage_candidate_count": stage_candidate_count,
+            "stage_pruned_paths": [
+                {"path_code": chain_code_key(state.get("path_code", [])),
+                 "reason": "global_stage_top_k"}
+                for state in stage_pruned
+            ],
+            "stage_selection_basis": "selection_rank_then_resource_estimate_not_measured_performance",
             "accepted_candidate_count": len(accepted_candidates),
             "best_stage_strategy_id": choose_best_candidate(accepted_candidates)["strategy_id"]
             if accepted_candidates
@@ -3140,6 +3262,7 @@ def run_deterministic_strategy_candidate(
         precheck_item=precheck_item,
         patch_result=patch_result,
     )
+    derive_fields(patch_ir, strategy_id=strategy_id)
     patch_ir["repair_attempt"] = attempt
     patch_ir["candidate_stage"] = stage
     save_candidate_json(DEFAULT_PATCH_IR_OUTPUT, stage, strategy_id, attempt, patch_ir, candidate_namespace)
@@ -3404,7 +3527,7 @@ def deterministic_code_regions(strategy_id: str, ir: dict[str, Any]) -> list[str
     if strategy_id.startswith("Tiling."):
         return ["LAUNCH_CONFIG"]
     if strategy_id.startswith("Mapping."):
-        return ["INDEX_MAPPING", "REGISTER_DECL", "COMPUTE_INNER", "STORE"]
+        return ["LAUNCH_CONFIG", "INDEX_MAPPING", "REGISTER_DECL", "COMPUTE_INNER", "STORE"]
     if strategy_id == "Layout.SharedMemory.AB.Basic":
         return ["SHARED_DECL"]
     if strategy_id in {"Layout.RegisterTile.C", "Register.AccumulatorLayout.2DArray"}:
@@ -3553,6 +3676,7 @@ def region_names_from_text(text: str) -> list[str]:
         "INDEX_MAPPING",
         "REGISTER_DECL",
         "GLOBAL_TO_SHARED_LOAD",
+        "NEXT_TILE_LOAD",
         "SYNC_AFTER_LOAD",
         "MAIN_LOOP",
         "COMPUTE_INNER",
@@ -3562,12 +3686,19 @@ def region_names_from_text(text: str) -> list[str]:
 
 
 def unique_region_names(regions: list[str]) -> list[str]:
+    regions = list(regions)
+    # A physical shared layout is consumed by all tile loads and reductions.
+    if "SHARED_DECL" in regions:
+        regions.extend(["GLOBAL_TO_SHARED_LOAD", "NEXT_TILE_LOAD", "COMPUTE_INNER", "MAIN_LOOP"])
+    if "GLOBAL_TO_SHARED_LOAD" in regions:
+        regions.append("NEXT_TILE_LOAD")
     valid = {
         "LAUNCH_CONFIG",
         "SHARED_DECL",
         "INDEX_MAPPING",
         "REGISTER_DECL",
         "GLOBAL_TO_SHARED_LOAD",
+        "NEXT_TILE_LOAD",
         "SYNC_AFTER_LOAD",
         "MAIN_LOOP",
         "COMPUTE_INNER",
@@ -3697,6 +3828,12 @@ def launch_config_lines(ir: dict[str, Any]) -> list[str]:
     wniter = ir_int(ir, "tiling.warp_tile.warp_n_iter", 1)
     tm = ir_int(ir, "tiling.thread_m", 1)
     tn = ir_int(ir, "tiling.thread_n", 1)
+    warp_size = ir_int(ir, "hardware.warp_size", 32)
+    if not warp_iteration_is_valid(wm, wn, tm, tn, wmiter, wniter, warp_size):
+        extents = choose_warp_iteration_extents(wm, wn, tm, tn, warp_size)
+        if extents is None:
+            raise ValueError(f"No legal warp fragment for {wm}x{wn} / {tm}x{tn}")
+        wmiter, wniter = extents
     use_tiled_launch = bool(ir.get("tiling", {}).get("enabled")) or bm > 32 or bn > 32
     launch_lines = [
         f"static const int BM = {bm};",
@@ -4443,17 +4580,19 @@ def build_joint_tiling_micro_selection(
     strategy_library: dict[str, Any],
     available_strategy_index: dict[str, Any],
     top_k: int,
+    resource_pool_size: int = DEFAULT_TILING_RESOURCE_POOL_SIZE,
 ) -> dict[str, Any]:
     allowed_blocks = {
         item.get("strategy_id")
         for item in available_strategy_index.get("strategies", []) or []
         if isinstance(item, dict)
     }
-    legal_candidates = [
+    all_legal_candidates = [
         item
         for item in build_joint_tiling_candidates(strategy_library, current_ir)
         if item["block_strategy_id"] in allowed_blocks
     ]
+    legal_candidates = make_diverse_tiling_pool(all_legal_candidates, resource_pool_size)
     selected_ids = []
     llm_reason = ""
     llm_error = None
@@ -4494,7 +4633,9 @@ def build_joint_tiling_micro_selection(
         "expected_ir_updates": {},
         "candidates": candidates,
         "selection_mode": "llm_joint_tiling_tuple_selection",
-        "legal_tuple_count": len(legal_candidates),
+        "legal_tuple_count": len(all_legal_candidates),
+        "resource_pool_count": len(legal_candidates),
+        "resource_pool_size": resource_pool_size,
         "prompt_option_count": {
             "block": len({item["block_strategy_id"] for item in legal_candidates}),
             "warp": len({item["warp_strategy_id"] for item in legal_candidates}),
@@ -4558,6 +4699,15 @@ def tiling_plan_ir_updates(strategy_id: str, plan: dict[str, Any]) -> dict[str, 
             "tiling.thread_n": plan.get("TN"),
             "tiling.warp_tile.warp_m_iter": plan.get("WMITER"),
             "tiling.warp_tile.warp_n_iter": plan.get("WNITER"),
+            "resource.tiling_candidate.architecture_family": plan.get("architecture_family"),
+            "resource.tiling_candidate.resident_ctas_per_sm": plan.get("resident_ctas_per_sm"),
+            "resource.tiling_candidate.active_warps_per_sm": plan.get("active_warps_per_sm"),
+            "resource.tiling_candidate.estimated_occupancy": plan.get("estimated_occupancy"),
+            "resource.tiling_candidate.cta_count": plan.get("cta_count"),
+            "resource.tiling_candidate.cta_waves": plan.get("cta_waves"),
+            "resource.tiling_candidate.sm_coverage": plan.get("sm_coverage"),
+            "resource.tiling_candidate.last_wave_utilization": plan.get("last_wave_utilization"),
+            "resource.tiling_candidate.architecture_score": plan.get("architecture_score"),
         }
     return {}
 
@@ -4820,6 +4970,7 @@ def compact_ir_summary(ir: dict[str, Any]) -> dict[str, Any]:
 def compact_joint_tiling_ir_summary(ir: dict[str, Any]) -> dict[str, Any]:
     hardware = ir.get("hardware", {}) or {}
     gpu = hardware.get("gpu", {}) or {}
+    execution_profile = build_gpu_architecture_profile(hardware)
     return {
         "problem": copy.deepcopy(ir.get("problem", {}) or {}),
         "hardware": {
@@ -4831,6 +4982,7 @@ def compact_joint_tiling_ir_summary(ir: dict[str, Any]) -> dict[str, Any]:
             ),
             "sm_count": hardware.get("sm_count", gpu.get("sm_count")),
             "compute_capability": hardware.get("compute_capability", gpu.get("compute_capability")),
+            "execution_profile": execution_profile,
         },
     }
 
@@ -5138,7 +5290,7 @@ def repair_chain_locally(source_chain_dir, output_chain_dir, diagnosis=None, ir=
         "patch_contract": {
             "region_edits_only": True,
             "allowed_regions": ["LAUNCH_CONFIG", "SHARED_DECL", "INDEX_MAPPING", "REGISTER_DECL",
-                                "GLOBAL_TO_SHARED_LOAD", "SYNC_AFTER_LOAD", "MAIN_LOOP", "COMPUTE_INNER", "STORE"],
+                                "GLOBAL_TO_SHARED_LOAD", "NEXT_TILE_LOAD", "SYNC_AFTER_LOAD", "MAIN_LOOP", "COMPUTE_INNER", "STORE"],
             "preserved_regions": [],
         },
     }
@@ -5158,6 +5310,9 @@ def repair_chain_locally(source_chain_dir, output_chain_dir, diagnosis=None, ir=
         applied = apply_generated_code_files(generated, output_chain_dir, ir or {}, strategy)
         if applied.get("status") != "pass":
             raise ValueError(applied.get("error_message", "local repair application failed"))
+        syntax = check_generated_source_syntax(output_chain_dir, backend_ast_files(ir or {}))
+        if syntax.get("accepted") is False:
+            raise ValueError("Repair introduced source syntax defects: " + json.dumps(syntax["results"]))
         return {"status": "repair_generated", "method": "llm_region_patch", "patch": generated}
     except Exception as exc:
         restore_source_files(output_chain_dir, originals)
@@ -5397,6 +5552,18 @@ def verify_terminal_chain_once(
     benchmark_warmup_runs: int = DEFAULT_BENCHMARK_WARMUP_RUNS,
 ) -> dict[str, Any]:
     current_ir = copy.deepcopy(terminal_ir)
+    if target_backend(current_ir) != "cpu":
+        from SGPO.verification.memory_access_plan import enforce_memory_access_plan
+        access_plan = enforce_memory_access_plan(chain_dir)
+        current_ir["memory_access_plan_verification"] = access_plan
+        save_json(chain_dir / "memory_access_plan_verification.json", access_plan)
+        if access_plan.get("materialized"):
+            current_ir.setdefault("memory", {})["access_plan"] = {
+                "mode": "deterministic_safe_scalar_fallback",
+                "shared_A_layout": "k_m",
+                "shared_B_layout": "k_n",
+                "tail_policy": "zero_fill",
+            }
     if target_backend(current_ir) != "cpu":
         current_ir["phase1_hard_constraints"] = check_after_codegen(
             current_ir, include_hard_constraints=True,
@@ -5948,11 +6115,133 @@ def partial_candidate_score(candidate: dict[str, Any]) -> tuple[int, float]:
     return (path_len, gflops if gflops is not None else -1.0)
 
 
+def select_stage_survivors(states: list[dict[str, Any]], top_k: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Bound stage output independently of how pending candidates were explored."""
+    if top_k <= 0 or len(states) <= top_k:
+        return list(states), []
+
+    has_architecture_scores = any(
+        ir_get(state.get("current_ir", {}), "resource.tiling_candidate.architecture_score") is not None
+        for state in states
+    )
+
+    def rank(state):
+        # Path components encode local LLM candidate order. Do not rank incomplete
+        # kernels using inherited/stale GFLOPS from the initial skeleton.
+        ranks = [int_or_default(value, 1) for value in state.get("path_code", [])]
+        mean_rank = sum(ranks) / len(ranks) if ranks else 1.0
+        ir = state.get("current_ir", {})
+        shared = ir_get(ir, "resource.shared_memory.total_bytes", 0)
+        try:
+            shared = float(shared or 0)
+        except (TypeError, ValueError):
+            shared = float("inf")
+        architecture_score = ir_get(ir, "resource.tiling_candidate.architecture_score")
+        try:
+            architecture_score = float(architecture_score)
+        except (TypeError, ValueError):
+            architecture_score = float("-inf")
+        if has_architecture_scores:
+            return -architecture_score, mean_rank, shared, tuple(ranks)
+        return mean_rank, shared, tuple(ranks)
+
+    ordered = sorted(states, key=rank)
+    return ordered[:top_k], ordered[top_k:]
+
+
+def build_phase1_compile_shortlist(
+    completed_states: list[dict[str, Any]],
+    fallback_states: list[dict[str, Any]],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Keep one global compile budget, preferring fully constructed unique paths."""
+    if top_k <= 0:
+        return [*completed_states, *fallback_states]
+    unique: dict[tuple[str, ...], dict[str, Any]] = {}
+    for state in [*completed_states, *fallback_states]:
+        path_key = tuple(state.get("path", []) or [])
+        if not path_key:
+            continue
+        unique.setdefault(path_key, state)
+
+    completed_keys = {tuple(state.get("path", []) or []) for state in completed_states}
+
+    def rank(state: dict[str, Any]) -> tuple[Any, ...]:
+        path = tuple(state.get("path", []) or [])
+        architecture_score = ir_get(
+            state.get("current_ir", {}),
+            "resource.tiling_candidate.architecture_score",
+            float("-inf"),
+        )
+        try:
+            architecture_score = float(architecture_score)
+        except (TypeError, ValueError):
+            architecture_score = float("-inf")
+        path_ranks = tuple(int_or_default(value, 1) for value in state.get("path_code", []) or [])
+        return (
+            0 if path in completed_keys else 1,
+            -len(path),
+            -architecture_score,
+            path_ranks,
+        )
+
+    ordered = sorted(unique.values(), key=rank)
+    shortlist: list[dict[str, Any]] = []
+    selected_paths: set[tuple[str, ...]] = set()
+
+    # Keep materially different tile regimes alive until target-device
+    # measurement. A scalar resource score is not reliable enough to discard
+    # every high-reuse candidate before compilation.
+    for tiling_class in ("high_parallel", "balanced", "high_reuse"):
+        representative = next(
+            (state for state in ordered if phase1_tiling_class(state) == tiling_class),
+            None,
+        )
+        if representative is None:
+            continue
+        path = tuple(representative.get("path", []) or [])
+        shortlist.append(representative)
+        selected_paths.add(path)
+        if len(shortlist) >= top_k:
+            return shortlist
+
+    for state in ordered:
+        path = tuple(state.get("path", []) or [])
+        if path in selected_paths:
+            continue
+        shortlist.append(state)
+        selected_paths.add(path)
+        if len(shortlist) >= top_k:
+            break
+    return shortlist
+
+
+def phase1_tiling_class(state: dict[str, Any]) -> str:
+    ir = state.get("current_ir", {}) or {}
+    bm = int_or_default(ir_get(ir, "tiling.block_m"), 0)
+    bn = int_or_default(ir_get(ir, "tiling.block_n"), 0)
+    area = bm * bn
+    if area < 4096:
+        return "high_parallel"
+    if area < 8192:
+        return "balanced"
+    return "high_reuse"
+
+
 def frontier_state_score(state: dict[str, Any]) -> float:
     candidate = state.get("last_candidate")
     score = candidate_gflops(candidate)
     if score is not None:
         return score
+    architecture_score = ir_get(
+        state.get("current_ir", {}),
+        "resource.tiling_candidate.architecture_score",
+    )
+    try:
+        if architecture_score is not None:
+            return float(architecture_score)
+    except (TypeError, ValueError):
+        pass
     try:
         return float(state.get("current_ir", {}).get("performance", {}).get("gflops"))
     except (TypeError, ValueError):

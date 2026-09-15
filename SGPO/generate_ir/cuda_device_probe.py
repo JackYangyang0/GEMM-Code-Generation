@@ -15,6 +15,7 @@ ATTRIBUTES = {
     "compute_capability_major": 75, "compute_capability_minor": 76,
     "max_shared_memory_per_multiprocessor_bytes": 81,
     "registers_per_multiprocessor": 82, "max_shared_memory_per_block_optin_bytes": 97,
+    "max_blocks_per_multiprocessor": 106,
     "max_persisting_l2_cache_bytes": 108, "max_access_policy_window_bytes": 109,
 }
 

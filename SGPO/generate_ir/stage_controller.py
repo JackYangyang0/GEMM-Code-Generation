@@ -1107,7 +1107,7 @@ def derive_fields(ir: dict[str, Any], subphase_id: str | None = None, strategy_i
         set_path(ir, "mapping.threads_per_block", warps_m * warps_n * warp_size)
         set_field_meta(ir, "mapping.warps_per_block", "derived", True, strategy_id, subphase_id)
         set_field_meta(ir, "mapping.threads_per_block", "derived", True, strategy_id, subphase_id)
-    if wm and wn and tm and tn and thread_tile_is_resolved(ir):
+    if wm and wn and tm and tn:
         warp_iter = choose_warp_iteration_extents(wm, wn, tm, tn, warp_size)
         if warp_iter and (iteration_fields_are_auto(ir) or not warp_iteration_is_valid(wm, wn, tm, tn, wmi, wni, warp_size)):
             wmi, wni = warp_iter
@@ -1116,8 +1116,9 @@ def derive_fields(ir: dict[str, Any], subphase_id: str | None = None, strategy_i
             set_field_meta(ir, "tiling.warp_tile.warp_m_iter", "derived_default", True, f"{subphase_id}.default_iteration" if subphase_id else strategy_id, subphase_id)
             set_field_meta(ir, "tiling.warp_tile.warp_n_iter", "derived_default", True, f"{subphase_id}.default_iteration" if subphase_id else strategy_id, subphase_id)
     if tm and tn:
-        set_path(ir, "mapping.outputs_per_thread", tm * tn * wmi * wni)
-        set_path(ir, "mapping.outputs_per_warp", warp_size * tm * tn * wmi * wni)
+        fragments = (wm // wmi) * (wn // wni) if wm and wn else 1
+        set_path(ir, "mapping.outputs_per_thread", tm * tn * fragments)
+        set_path(ir, "mapping.outputs_per_warp", warp_size * tm * tn * fragments)
         set_field_meta(ir, "mapping.outputs_per_thread", "derived", True, strategy_id, subphase_id)
         set_field_meta(ir, "mapping.outputs_per_warp", "derived", True, strategy_id, subphase_id)
     derive_resource_fields(ir, subphase_id, strategy_id)
@@ -1209,6 +1210,9 @@ def iteration_fields_are_auto(ir: dict[str, Any]) -> bool:
 
 
 def derive_resource_fields(ir: dict[str, Any], subphase_id: str | None = None, strategy_id: str | None = None) -> None:
+    from SGPO.generate_ir.gpu_resources import pipeline_stages
+    stages = pipeline_stages(ir)
+    set_path(ir, "resource.shared_memory.pipeline_multiplier", stages)
     bm = coerce_int(get_path(ir, "tiling.block_m"))
     bn = coerce_int(get_path(ir, "tiling.block_n"))
     bk = coerce_int(get_path(ir, "tiling.block_k"))
@@ -1221,7 +1225,8 @@ def derive_resource_fields(ir: dict[str, Any], subphase_id: str | None = None, s
     tm = coerce_int(get_path(ir, "tiling.thread_m")) or 1
     tn = coerce_int(get_path(ir, "tiling.thread_n")) or 1
     if get_path(ir, "resource.register.estimated_per_thread") is None:
-        set_path(ir, "resource.register.estimated_per_thread", tm * tn + tm + tn + 8)
+        outputs = coerce_int(get_path(ir, "mapping.outputs_per_thread")) or tm * tn
+        set_path(ir, "resource.register.estimated_per_thread", outputs + tm + tn + 8)
         set_field_meta(ir, "resource.register.estimated_per_thread", "derived", True, strategy_id, subphase_id)
 
 
@@ -1405,6 +1410,14 @@ def evaluate_text_condition(ir: dict[str, Any], condition: str) -> LocalCheckRes
 
 def evaluate_known_constraint(ir: dict[str, Any], condition: str) -> LocalCheckResult | None:
     constraint_id = condition.strip()
+    if constraint_id == "shared_memory_bytes * pipeline_multiplier <= hardware.max_shared_memory_per_block_bytes":
+        from SGPO.generate_ir.gpu_resources import shared_memory_limit
+        usage = shared_memory_usage(ir)
+        limit = shared_memory_limit(ir)
+        total = usage["per_stage_bytes"] * usage["stage_count"] + usage["auxiliary_bytes"]
+        ok = limit > 0 and total <= limit
+        return LocalCheckResult(constraint_id, "pass" if ok else "fail",
+                                f"shared-memory total {total} bytes <= limit {limit} bytes (stages counted once)")
     if constraint_id == "C_VECTOR_ALIGNMENT":
         failures = []
         for tensor in ["A", "B", "C"]:

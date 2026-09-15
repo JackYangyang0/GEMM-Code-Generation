@@ -30,6 +30,7 @@ CUDA_PATCH_REGIONS = {
     "INDEX_MAPPING",
     "REGISTER_DECL",
     "GLOBAL_TO_SHARED_LOAD",
+    "NEXT_TILE_LOAD",
     "SYNC_AFTER_LOAD",
     "MAIN_LOOP",
     "COMPUTE_INNER",
@@ -250,6 +251,17 @@ def apply_generated_code_files(
                 "error_message": "This strategy requires local region edits; full source files are forbidden"}
 
     ensure_generated_code_has_minimal_kernel(generated_code)
+    for relative_path, content in staged_content.items():
+        if relative_path != "cuda_kernel.cuh":
+            continue
+        original = original_content[relative_path]
+        if anchor_region(original, "SHARED_DECL") != anchor_region(content, "SHARED_DECL"):
+            edited = {item["region"] for item in generated_code.get("edits", []) if item["path"] == relative_path}
+            if "GLOBAL_TO_SHARED_LOAD" not in edited or "MAIN_LOOP" not in edited:
+                return {"status": "fail", "applied": [], "error_message":
+                        "Shared layout changes require GLOBAL_TO_SHARED_LOAD and MAIN_LOOP edits together; "
+                        "MAIN_LOOP must update NEXT_TILE_LOAD, all compute reads and final-tile reduction. "
+                        "Do not submit overlapping MAIN_LOOP and child-region edits."}
     from SGPO.verification.cuda_launch_config import configure_shared_launch
     try:
         for item in generated_code.get("files", []):
@@ -611,6 +623,8 @@ def region_anchor_name(region: dict[str, Any]) -> str | None:
         "INDEX_MAPPING",
         "REGISTER_DECL",
         "GLOBAL_TO_SHARED_LOAD",
+    "NEXT_TILE_LOAD",
+        "NEXT_TILE_LOAD",
         "SYNC_AFTER_LOAD",
         "MAIN_LOOP",
         "COMPUTE_INNER",
@@ -643,6 +657,8 @@ def region_requires_active_code(region_name: str, strategy_id: str) -> bool:
         "INDEX_MAPPING",
         "REGISTER_DECL",
         "GLOBAL_TO_SHARED_LOAD",
+    "NEXT_TILE_LOAD",
+        "NEXT_TILE_LOAD",
         "MAIN_LOOP",
         "COMPUTE_INNER",
         "STORE",

@@ -3,6 +3,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from SGPO.generate_ir.gpu_architecture import (
+    build_gpu_architecture_profile,
+    estimate_tiling_execution,
+)
 from SGPO.generate_ir.stage_controller import choose_warp_iteration_extents
 
 
@@ -32,6 +36,7 @@ def build_joint_tiling_candidates(
         49152,
     )
     element_bytes = dtype_bytes(optir)
+    execution_profile = build_gpu_architecture_profile(optir.get("hardware", {}))
 
     candidates = []
     for block_id, (bm, bn, bk) in block_tiles:
@@ -51,6 +56,22 @@ def build_joint_tiling_candidates(
                     continue
                 wmiter, wniter = warp_iteration
                 accumulator_count = (wm // wmiter * tm) * (wn // wniter * tn)
+                estimated_registers = accumulator_count + tm + tn + 16
+                execution = estimate_tiling_execution(
+                    optir.get("problem", {}),
+                    execution_profile,
+                    bm=bm,
+                    bn=bn,
+                    bk=bk,
+                    threads_per_block=threads_per_block,
+                    warps_per_block=warps_per_block,
+                    shared_memory_bytes=shared_memory_bytes,
+                    estimated_registers_per_thread=estimated_registers,
+                    element_bytes=element_bytes,
+                    estimated_accumulators_per_thread=accumulator_count,
+                )
+                if execution["resident_ctas_per_sm"] == 0:
+                    continue
                 candidate_id = f"tile_{bm}x{bn}x{bk}__{wm}x{wn}__{tm}x{tn}"
                 candidates.append(
                     {
@@ -71,8 +92,11 @@ def build_joint_tiling_candidates(
                         "threads_per_block": threads_per_block,
                         "shared_memory_bytes": shared_memory_bytes,
                         "estimated_accumulators_per_thread": accumulator_count,
+                        "estimated_registers_per_thread": estimated_registers,
                         "shape_class": shape_class(bm, bn),
                         "resource_class": resource_class(threads_per_block, accumulator_count),
+                        "architecture_family": execution_profile["architecture_family"],
+                        **execution,
                     }
                 )
     return sorted(candidates, key=joint_candidate_sort_key)
@@ -147,7 +171,11 @@ def tiling_plan_for_ir(candidate: dict[str, Any]) -> dict[str, Any]:
         "candidate_id", "block_strategy_id", "warp_strategy_id", "thread_strategy_id",
         "BM", "BN", "BK", "WM", "WN", "TM", "TN", "WMITER", "WNITER",
         "warps_per_block", "threads_per_block", "shared_memory_bytes",
-        "estimated_accumulators_per_thread", "shape_class", "resource_class",
+        "estimated_accumulators_per_thread", "estimated_registers_per_thread",
+        "shape_class", "resource_class", "architecture_family", "resident_ctas_per_sm",
+        "active_warps_per_sm", "estimated_occupancy", "cta_count", "cta_waves",
+        "sm_coverage", "last_wave_utilization", "arithmetic_intensity_flop_per_byte",
+        "architecture_score",
     )
     return {key: candidate[key] for key in keys}
 
@@ -156,7 +184,10 @@ def compact_tiling_candidates(candidates: list[dict[str, Any]]) -> list[dict[str
     keys = (
         "candidate_id", "BM", "BN", "BK", "WM", "WN", "TM", "TN",
         "warps_per_block", "threads_per_block", "shared_memory_bytes",
-        "estimated_accumulators_per_thread", "shape_class", "resource_class",
+        "estimated_accumulators_per_thread", "estimated_registers_per_thread",
+        "shape_class", "resource_class", "architecture_family", "resident_ctas_per_sm",
+        "estimated_occupancy", "cta_count", "cta_waves", "sm_coverage",
+        "last_wave_utilization", "arithmetic_intensity_flop_per_byte", "architecture_score",
     )
     return [{key: item[key] for key in keys} for item in candidates]
 
@@ -186,6 +217,7 @@ def parse_strategy_tiles(strategy_ids: set[str], pattern: re.Pattern[str]) -> li
 
 def joint_candidate_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
     return (
+        -float(item.get("architecture_score") or 0.0),
         item["threads_per_block"],
         item["estimated_accumulators_per_thread"],
         item["shared_memory_bytes"],

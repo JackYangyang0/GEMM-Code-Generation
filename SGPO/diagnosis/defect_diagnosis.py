@@ -94,7 +94,10 @@ RUNTIME_ERROR_RULES = [
             "vectorization.C.alignment_guard",
             "vectorization.C.alignment_proven",
         ],
-        "repair_action": "add alignment guard/proof or reduce vector_width",
+        "repair_action": "inspect every float4 access in GLOBAL_TO_SHARED_LOAD, NEXT_TILE_LOAD and STORE; "
+                         "repair vector-aware INDEX_MAPPING and strides, add actual alignment guards with scalar fallback "
+                         "or reduce vector width in BOTH initial and subsequent tile loads; "
+                         "keep all shared-memory writes and compute reads consistent with SHARED_DECL dimensions",
     },
     {
         "patterns": ["illegal memory access", "out of bounds"],

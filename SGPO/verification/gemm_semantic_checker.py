@@ -354,6 +354,10 @@ def check_warp_lane_fragment_coverage(code: str, launch_config: dict[str, int], 
     divides_tile = wm % wmiter == 0 and wn % wniter == 0 if wmiter and wniter else False
     has_expected_trow = bool(re.search(r"\bTrow\s*=\s*lane\s*/\s*\(?\s*WNITER\s*/\s*TN\s*\)?", code))
     has_expected_tcol = bool(re.search(r"\bTcol\s*=\s*lane\s*%\s*\(?\s*WNITER\s*/\s*TN\s*\)?", code))
+    if re.search(r"\blane_cols\s*=\s*WNITER\s*/\s*TN\s*;", code):
+        has_expected_trow |= bool(re.search(r"\bTrow\s*=\s*lane\s*/\s*lane_cols\s*;", code))
+        has_expected_tcol |= bool(re.search(
+            r"\bTcol\s*=\s*(?:lane\s*%\s*lane_cols|lane\s*-\s*Trow\s*\*\s*lane_cols)\s*;", code))
     if fragment_lane_count == warp_size and divides_tile and has_expected_trow and has_expected_tcol:
         return make_result(
             "GEMM_WARP_LANE_FRAGMENT_COVERS_WARP_TILE",

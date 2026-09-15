@@ -481,8 +481,19 @@ def probe_local_hardware(template_hardware: dict[str, Any]) -> dict[str, Any]:
 
     attributes = query_cuda_attributes()
     hardware.update(attributes)
+    hardware["sm_count"] = (
+        attributes.get("multiprocessor_count")
+        or device.get("multiprocessor_count")
+        or hardware.get("sm_count")
+    )
+    hardware["max_blocks_per_sm"] = (
+        attributes.get("max_blocks_per_multiprocessor")
+        or hardware.get("max_blocks_per_sm")
+    )
     if isinstance(hardware.get("gpu"), dict):
         hardware["gpu"].update(attributes)
+        hardware["gpu"]["sm_count"] = hardware.get("sm_count")
+        hardware["gpu"]["max_blocks_per_sm"] = hardware.get("max_blocks_per_sm")
     cc_major = hardware.get("compute_capability_major")
     hardware["supports_shared_memory_optin"] = bool(
         attributes.get("max_shared_memory_per_block_optin_bytes", 0)
@@ -493,6 +504,8 @@ def probe_local_hardware(template_hardware: dict[str, Any]) -> dict[str, Any]:
     hardware["supports_cp_async"] = bool(cc_major and cc_major >= 8)
     hardware["supports_tensor_core"] = bool(cc_major and cc_major >= 7)
     hardware["supports_tf32_tensor_core"] = bool(cc_major and cc_major >= 8)
+    from SGPO.generate_ir.gpu_architecture import build_gpu_architecture_profile
+    hardware["execution_profile"] = build_gpu_architecture_profile(hardware)
     return hardware
 
 

@@ -192,6 +192,17 @@ def compact_joint_tiling_option_space(tiling_candidates):
                 continue
             unique[strategy_id] = {key: item.get(key) for key in keys}
         result[group] = [unique[key] for key in sorted(unique)]
+    ranked_keys = (
+        "candidate_id", "block_strategy_id", "warp_strategy_id", "thread_strategy_id",
+        "BM", "BN", "BK", "WM", "WN", "TM", "TN", "threads_per_block",
+        "estimated_registers_per_thread", "resident_ctas_per_sm", "estimated_occupancy",
+        "cta_count", "cta_waves", "sm_coverage", "last_wave_utilization",
+        "architecture_score",
+    )
+    result["ranked_legal_combinations"] = [
+        {key: item.get(key) for key in ranked_keys}
+        for item in tiling_candidates[:48]
+    ]
     return result
 
 

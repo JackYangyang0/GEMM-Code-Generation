@@ -67,3 +67,12 @@ SCOPED_CODE_CONTEXT:
 
 REPAIR_CONTEXT:
 {repair_context_json}
+
+Coupled-region rules:
+- GLOBAL_TO_SHARED_LOAD initializes the first tile; NEXT_TILE_LOAD loads every subsequent tile. Inspect both.
+- If SHARED_DECL shape or dimension order changes, update GLOBAL_TO_SHARED_LOAD and MAIN_LOOP together.
+- MAIN_LOOP edits must preserve synchronization and update NEXT_TILE_LOAD, compute reads and final-tile reduction consistently.
+- Do not return overlapping parent MAIN_LOOP and child-region edits.
+- For alignment repair, fix the actual vector accesses and vector-aware mapping in every load site; changing COMPUTE_INNER alone cannot repair a misaligned global load.
+- A scalar fallback must cover the entire tile, not just one element of each old float4 transaction.
+- Coupled repairs may exceed the normal region limit. Preserve unrelated optimizations.
