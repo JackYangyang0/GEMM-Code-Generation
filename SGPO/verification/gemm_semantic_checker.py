@@ -164,6 +164,24 @@ def check_store_bounds_use_global_coordinates(content: str, code: str) -> dict[s
     has_block_offsets = "C_offset" in store or bool(re.search(r"\b(?:tile_m0|blockIdx\.y\s*\*\s*BM)\b", store))
     dimension_guards = [item for item in extract_if_conditions(store) if re.search(r"<\s*M\b", item) and re.search(r"<\s*N\b", item)]
     guard_is_global = any(re.search(r"tile_m0|tile_n0|blockIdx|global_[mn]\b", item) for item in dimension_guards)
+    # Resolve immutable coordinate aliases; names such as gm/gn_base are not local
+    # merely because they do not contain the word 'global'.
+    definitions = {}
+    for name, expression in re.findall(r'\bconst\s+int\s+(\w+)\s*=\s*([^;]+);', store):
+        definitions.setdefault(name, []).append(expression)
+    def expand_aliases(expression, depth=0):
+        if depth >= 8:
+            return expression
+        def resolve(match):
+            name = match[0]
+            values = definitions.get(name, [])
+            if len(values) != 1 or re.search(r'\b' + re.escape(name) + r'\s*(?:\+=|-=|\+\+|--)', store):
+                return name
+            return '(' + expand_aliases(values[0], depth + 1) + ')'
+        return re.sub(r'\b\w+\b', resolve, expression)
+    if dimension_guards and not guard_is_global:
+        expanded = [expand_aliases(condition) for condition in dimension_guards]
+        guard_is_global = all('tile_m0' in condition and 'tile_n0' in condition for condition in expanded)
     if has_block_offsets and dimension_guards and not guard_is_global:
         return make_result(
             "GEMM_STORE_BOUNDS_USE_GLOBAL_COORDINATES", "fail",
@@ -894,6 +912,15 @@ def find_2d_float_accumulator_candidates(code: str) -> list[dict[str, Any]]:
             )
         )
         accumulated = bool(re.search(rf"\b{escaped}\s*\[[^\]]+\]\s*\[[^\]]+\]\s*\+=", code))
+        if not accumulated:
+            for update in re.finditer(
+                rf"\b{escaped}\s*(\[[^\]]+\]\s*\[[^\]]+\])\s*=\s*fmaf?\(([^;]+)\)\s*;", code
+            ):
+                indices = re.sub(r"\s+", "", update.group(1))
+                rhs = re.sub(r"\s+", "", update.group(2))
+                if rhs.endswith("," + name + indices):
+                    accumulated = True
+                    break
         stored = bool(
             re.search(
                 rf"\bC\s*\[[^\]]+\]\s*=[^;]*\b{escaped}\s*\[[^\]]+\]\s*\[[^\]]+\]",
@@ -1002,6 +1029,7 @@ def code_segment_has_k_tile_dependency(segment: str, loop_var: str) -> bool:
     var = re.escape(loop_var)
     return bool(
         re.search(rf"\bglobal_k\s*=\s*[^;]*\b{var}\b", segment)
+        or re.search(rf"\(\s*{var}\s*[+-]\s*\d+\s*\)\s*\*\s*BK\b", segment)
         or re.search(rf"\b{var}\b\s*(?:\+|\-|\*|/|%)\s*(?:BK|{IDENTIFIER})", segment)
         or re.search(rf"(?:BK|{IDENTIFIER})\s*(?:\+|\-|\*|/|%)\s*\b{var}\b", segment)
         or re.search(rf"OFFSET\s*\([^;]*\b{var}\b", segment, flags=re.DOTALL)

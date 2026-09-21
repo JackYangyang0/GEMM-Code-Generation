@@ -1,0 +1,26 @@
+Repair this CUDA implementation under a LOCKED strategy contract.
+The strategy combination has passed upstream eligibility checks. Treat the failure as an implementation defect, not permission to choose another strategy.
+
+Read the COMPLETE_CUDA_CONTEXT, including declarations, helpers, initial and subsequent loads, compute, synchronization, launch and epilogue. The fixed benchmark main is intentionally excluded.
+Fix compilation, mathematical correctness and runtime safety while implementing ALL locked strategies and their parameters. Do not change the GEMM specification, API, selected strategy list, precision, tile values, test tolerances or benchmark.
+Do not remove vector loads, buffering, padding or asynchronous execution to make tests pass. Their implementation may be rewritten to satisfy the same strategy semantics; variable names and old code forms are not requirements.
+Memory-access diagnostics do not authorize scalar replacement. For a duplicate block offset, use either global coordinates or block-local coordinates plus the block offset, never both. Preserve the selected vector width in BOTH initial and subsequent tile loads, including matching thread-to-vector mapping, transposed shared stores, alignment checks and tail handling. Scalar tails are permitted for invalid/unaligned vectors, not as a replacement for the selected vector fast path. Preserve buffer lifetime and synchronization when repairing these regions together.
+Stage localization is a hypothesis, not proof. Check interacting earlier stages and use the diagnosis against the current failed source. A repair baseline is not necessarily a verified version.
+Treat each coupled group as one repair: mapping + first/next vector loads + shared scatter; shared storage + buffer switching + synchronization + final reduction; output mapping + accumulator + alpha/beta. Review declarations outside anchors before adding symbols inside them. Never duplicate existing tid/warp/launch declarations or assign shared arrays to arrays. Repair feedback includes actual compiler/runtime results and failed patch diffs; address those failures rather than repeating the previous patch.
+If a concrete missing constraint is discovered, report evidence; do not silently drop strategies. Exhausting repair attempts does not prove a conflict.
+Return only JSON with strategy_id equal to Repair.PreserveAppliedStrategies and edits containing path, region and replacement (string array via replacement_lines is supported). Do not return IR updates or selected strategies. Do not modify kernel.h or main. Each replacement is a complete region body, not an appended fragment. Do not include overlapping parent/child edits. All existing CUDA regions are available; suggested regions are only localization hints, not a two-region limit. Introduce needed declarations inside appropriate regions.
+
+LOCKED_STRATEGY_CONTRACT:
+{strategy_json}
+
+CURRENT_IR_SUMMARY:
+{patch_ir_json}
+
+REPAIR_REQUEST:
+{patch_json}
+
+COMPLETE_CUDA_CONTEXT:
+{code_context_json}
+
+DIAGNOSIS_AND_HISTORY:
+{repair_context_json}

@@ -361,6 +361,12 @@ def synthesize_code_requirements(strategy_id: str) -> list[str]:
         return ["Use guarded or proven-aligned float4 global loads for A and B."]
     if strategy_id == "Pipeline.DoubleBuffer.SharedAB":
         return ["Use two shared-memory buffers for staged load/compute overlap."]
+    if strategy_id.startswith("Pipeline.CpAsync.Multistage"):
+        return [
+            "Use compile-time static staged __shared__ A/B buffers; Multistage2 is a static double buffer.",
+            "Do not introduce extern __shared__ or dynamic launch configuration.",
+            "Use the fixed cuda_pipeline.h capability include or equivalent real cp.async PTX.",
+        ]
     return []
 
 

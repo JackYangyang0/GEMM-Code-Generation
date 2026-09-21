@@ -88,6 +88,7 @@ from SGPO.verification.gemm_semantic_repair import (
     normalize_launch_config_for_repair,
     normalize_throughput_launch_config,
 )
+from SGPO.verification.strategy_realization_oracle import verify_strategy_realization
 from SGPO.verification.patch_apply_verify import mark_patch_apply_failed, summarize_verification
 
 
@@ -96,7 +97,7 @@ DEFAULT_DESCRIPTION = (
     # "I need to generate a high-performance CUDA GEMM implementation for "
     # "row-major fp32 NN GEMM. Matrix Size: (M:4096 N:4096 K:4096)."
     "I need to generate a high-performance CUDA GEMM implementation for the row master fp32 NN GEMM. "
-    "matrix size: (M: 1024 N: 1024 K: 1024)."
+    "matrix size: (M: 512 N: 512 K: 512)."
 )
 DEFAULT_IR_PATCH_DIR = ROOT / "data" / "IRs" / "ir_patch"
 DEFAULT_IR_OUTPUT = DEFAULT_IR_PATCH_DIR / "optir.extracted.json"
@@ -164,8 +165,8 @@ DEFAULT_SINGLE_PATH_MODE = False
 DEFAULT_TOP_K_STRATEGIES_PER_SUBPHASE = 3
 DEFAULT_TOP_K_FINAL_RESULTS = 3
 DEFAULT_TILING_TOP_K_PER_LEVEL = 3
-DEFAULT_TILING_RESOURCE_POOL_SIZE = 24
-DEFAULT_TILING_LLM_TOP_N = 9
+DEFAULT_TILING_RESOURCE_POOL_SIZE = 32
+DEFAULT_TILING_LLM_TOP_N = 3
 DEFAULT_PHASE1_FRONTIER_SIZE = 6
 DEFAULT_COMPILE_SHORTLIST_SIZE = 6
 DEFAULT_CORE_CONSTRUCTION_FRONTIER_STATES = DEFAULT_PHASE1_FRONTIER_SIZE
@@ -178,6 +179,17 @@ DEFAULT_COMPILE_EACH_STRATEGY_STEP = False
 DEFAULT_COMPILE_EACH_STAGE = False
 DEFAULT_STAGE_BENCHMARK_RUNS = 1
 DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS = 0
+DEFAULT_STAGE_MMR_LAMBDA = 0.6
+DEFAULT_STAGE_PERFORMANCE_FLOOR_RATIO = 0.8
+STAGE_MMR_LAMBDA = DEFAULT_STAGE_MMR_LAMBDA
+STAGE_PERFORMANCE_FLOOR_RATIO = DEFAULT_STAGE_PERFORMANCE_FLOOR_RATIO
+FEEDBACK_SEARCH_LIMITS = {
+    "max_rounds": 3,
+    "experiments_per_round": 3,
+    "max_rollback_depth": 2,
+    "max_total_compilations": 12,
+    "no_improvement_patience": 2,
+}
 DEFAULT_VERIFY_INITIAL_SKELETON = True
 DEFAULT_STEP_COMPILE_TIMEOUT_SECONDS = 180
 MAX_ARTIFACT_STEM_LENGTH = 140
@@ -394,11 +406,21 @@ STABLE_BASELINE_DENY_IDS = {
 
 def main() -> None:
     args = parse_args()
+    if args.resume_terminal:
+        from SGPO.verification.resume_terminal import resume_terminal
+        resume_terminal(args)
+        return
     description = DEFAULT_DESCRIPTION
     user_question = DEFAULT_DESCRIPTION
 
     template = load_json(Path(DEFAULT_TEMPLATE))
     current_ir = build_extracted_ir(template, description)
+    if args.matrix_size:
+        if min(args.matrix_size) <= 0:
+            raise ValueError("--matrix-size requires positive M N K")
+        current_ir["problem"].update(zip(("M", "N", "K"), args.matrix_size))
+        description = f"{description}\nTarget matrix dimensions (override): M={args.matrix_size[0]}, N={args.matrix_size[1]}, K={args.matrix_size[2]}."
+        user_question = description
     save_json(Path(DEFAULT_IR_OUTPUT), current_ir)
 
     raw_strategy_index, strategy_library = load_strategy_documents(current_ir)
@@ -410,11 +432,16 @@ def main() -> None:
     code_files = backend_code_files(current_ir)
 
     config = load_config(Path(DEFAULT_CONFIG))
+    from SGPO.specialization.shape_specialization import resolve_config, load_existing_seed, specialize_shapes
+    specialization_config = resolve_config(config, args.shape_reuse, args.reuse_family)
+    existing_seed = None
+    if target_backend(current_ir) == "cuda" and specialization_config.get("enabled") and specialization_config["seed_source"] == "existing":
+        existing_seed = load_existing_seed(specialization_config["seed_dir"], current_ir)
     configure_execution(config.get("execution"))
     print(f"SGPO execution: chain_workers={execution_config().chain_workers}, "
           f"llm_max_concurrency={execution_config().llm_max_concurrency}, "
           f"compile_workers={execution_config().compile_workers}, gpu_verification_workers=1")
-    if should_clean_generated_outputs(args, config):
+    if existing_seed is None and should_clean_generated_outputs(args, config):
         clean_generated_outputs(current_ir)
         save_json(Path(DEFAULT_IR_OUTPUT), current_ir)
     build_platform = resolve_build_platform(args, config)
@@ -425,6 +452,14 @@ def main() -> None:
     per_stage_benchmark_warmup_runs = stage_benchmark_warmup_runs(config)
     terminal_benchmark_runs = benchmark_runs(args, config)
     terminal_benchmark_warmup_runs = benchmark_warmup_runs(args, config)
+    if existing_seed is not None:
+        report = specialize_shapes(
+            existing_seed, strategy_library, ROOT / "gemm_code" / "shape_specialization",
+            specialization_config, build_platform, terminal_benchmark_runs,
+            terminal_benchmark_warmup_runs, client=OpenAICompatibleClient(config['llm']))
+        save_json(DEFAULT_CHECK_DIR / "shape_specialization.json", report)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
     restore_initial_cuda_skeleton(code_root, current_ir)
     if should_verify_initial_skeleton(args, config):
         initial_skeleton_ir = verify_initial_skeleton_before_search(
@@ -443,6 +478,7 @@ def main() -> None:
     client = OpenAICompatibleClient(config["llm"])
     search_config = config.get("search", {}) or {}
     performance_config = config.get("performance_unlock", {}) or {}
+    configure_search_policy(search_config, config.get("feedback_search", {}) or {})
     max_frontier_states = 1 if DEFAULT_SINGLE_PATH_MODE else int(
         search_config.get("max_frontier_states_per_stage", DEFAULT_MAX_FRONTIER_STATES_PER_STAGE) or 0
     )
@@ -606,6 +642,35 @@ def main() -> None:
     })
     stage_summaries.append(terminal_verification["summary"])
 
+    transfer_config = specialization_config
+    if target_backend(current_ir) != "cpu" and transfer_config.get("enabled", False):
+        print("Shape specialization: independent Top-1 Tile tuning per target shape", flush=True)
+        try:
+            transfer_report = specialize_shapes(
+                best_overall_candidate, strategy_library,
+                ROOT / "gemm_code" / "shape_specialization",
+                transfer_config, build_platform, terminal_benchmark_runs,
+                terminal_benchmark_warmup_runs, client=client,
+            )
+        except Exception as exc:
+            transfer_report = {"stage": "ShapeSpecialization", "status": "failed", "error": str(exc)}
+        save_json(DEFAULT_CHECK_DIR / "shape_specialization.json", transfer_report)
+        stage_summaries.append(transfer_report)
+        from SGPO.specialization.shape_specialization import current_shape_candidates
+        specialized_candidates = current_shape_candidates(transfer_report, best_overall_candidate, current_ir)
+        if specialized_candidates:
+            terminal_verification = merge_terminal_verifications(terminal_verification, {
+                "verified_candidates": specialized_candidates,
+                "summary": {"phase": "shape_specialization", "terminal_chain_count": len(specialized_candidates)},
+            })
+            best_overall_candidate = terminal_verification.get("best_candidate")
+            top_terminal_results = terminal_verification.get("top_terminal_results", [])
+            save_json(Path(DEFAULT_TOP_RESULTS_OUTPUT), {
+                "selection_mode": DEFAULT_SELECTION_MODE,
+                "top_k_final_results": DEFAULT_TOP_K_FINAL_RESULTS,
+                "results": top_terminal_results,
+            })
+
     best_state = terminal_verification.get("best_state") or (select_best_frontier_state(frontier) if frontier else None)
     if best_overall_candidate:
         final_ir = best_overall_candidate["verified_ir"]
@@ -744,8 +809,39 @@ def main() -> None:
     )
 
 
+def publish_shape_reuse_result(result, code_root, registry):
+    from SGPO.specialization.shape_search import archive
+    candidates = result.get("candidates", [])
+    top = build_top_terminal_results(candidates, 3)
+    save_json(Path(DEFAULT_TOP_RESULTS_OUTPUT), {"selection_mode": "deterministic_shape_search", "results": top})
+    save_json(Path(DEFAULT_EVOLUTION_OUTPUT), {"selection_mode": "deterministic_shape_search",
+        "target_reached": not result["fallback_required"], "reason": result.get("reason"),
+        "rounds": result.get("rounds", []), "top_3_terminal_results": top})
+    if candidates:
+        best = max(candidates, key=lambda c: candidate_gflops(c) or 0)
+        ir = best["verified_ir"]
+        final = collect_final_code_from_snapshot(best["source_snapshot"], ir, best["history"], [])
+        save_json(Path(DEFAULT_FINAL_CODE_OUTPUT), final)
+        write_final_code_bundle(Path(DEFAULT_FINAL_CODE_BUNDLE_OUTPUT), final)
+        save_json(Path(DEFAULT_VERIFIED_IR_OUTPUT), ir)
+        materialize_final_generated_files(code_root, best["source_snapshot"], ir)
+        for candidate in candidates[:3]:
+            archive(candidate, registry)
+    else:
+        save_json(Path(DEFAULT_FINAL_CODE_OUTPUT), {"status": "no_verified_specialization",
+            "reason": result.get("reason"), "files": []})
+    print(json.dumps({"shape_reuse_reason": result.get("reason"), "top_results": top}, ensure_ascii=False, indent=2))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run SGPO GEMM strategy-guided optimization.")
+    parser.add_argument('--resume-terminal', action='store_true',
+                        help='Resume current terminal chains with real LLM repair and publish verified results; do not regenerate or clean outputs.')
+    parser.add_argument("--matrix-size", nargs=3, type=int, metavar=("M", "N", "K"))
+    parser.add_argument("--shape-reuse", choices=("auto", "off", "only"), default="auto",
+                        help="Compatibility switch: auto uses shape_specialization config; off disables it; only requires an existing seed.")
+    parser.add_argument("--reuse-family", type=Path,
+                        help="Use this existing CUDA directory as the shape_specialization seed; skip full generation and output cleanup.")
     parser.add_argument(
         "--build-platform",
         choices=["windows", "linux"],
@@ -824,6 +920,18 @@ def stage_benchmark_warmup_runs(config: dict[str, Any]) -> int:
     return max(0, int(build_config.get("stage_benchmark_warmup_runs", DEFAULT_STAGE_BENCHMARK_WARMUP_RUNS)))
 
 
+def configure_search_policy(search_config: dict[str, Any], feedback_config: dict[str, Any]) -> None:
+    global STAGE_MMR_LAMBDA, STAGE_PERFORMANCE_FLOOR_RATIO
+    selection = search_config.get("stage_survivor_selection", {}) or {}
+    STAGE_MMR_LAMBDA = min(1.0, max(0.0, float(selection.get("mmr_lambda", DEFAULT_STAGE_MMR_LAMBDA))))
+    STAGE_PERFORMANCE_FLOOR_RATIO = min(
+        1.0,
+        max(0.0, float(selection.get("performance_floor_ratio", DEFAULT_STAGE_PERFORMANCE_FLOOR_RATIO))),
+    )
+    for key, default in list(FEEDBACK_SEARCH_LIMITS.items()):
+        FEEDBACK_SEARCH_LIMITS[key] = max(1, int(feedback_config.get(key, default)))
+
+
 def should_verify_initial_skeleton(args: argparse.Namespace, config: dict[str, Any]) -> bool:
     if getattr(args, "skip_initial_skeleton_check", False):
         return False
@@ -891,7 +999,7 @@ def resolve_build_platform(args: argparse.Namespace, config: dict[str, Any]) -> 
 def restore_initial_cuda_skeleton(code_root: Path, ir: dict[str, Any]) -> None:
     if target_backend(ir) != "cuda":
         return
-    template = ROOT / "gemm_code" / "skeleton_template" / "cuda_kernel.cuh"
+    template = ROOT / "gemm_code" / "baseline_template" / "cuda_kernel.cuh"
     restore_source_files(code_root, {"cuda_kernel.cuh": template.read_text(encoding="utf-8")})
 
 
@@ -1146,6 +1254,20 @@ def run_unlocked_performance_phase(
             final_frontier.append(chain_report["final_state"])
         stage_summaries.append(chain_report["summary"])
 
+    resource_config = load_config(Path(DEFAULT_CONFIG)).get("bounded_resource_unlock", {}) or {}
+    if resource_config.get("enabled", False):
+        from SGPO.verification.bounded_resource_unlock import run_bounded_unlock
+        import uuid
+        resource_seeds = select_top_correct_candidates(
+            [*phase1_top, *unlocked_candidates], DEFAULT_TOP_K_FINAL_RESULTS)
+        resource_candidates = run_bounded_unlock(
+            resource_seeds, ROOT / "results" / "code" / ("resource_unlock_" + uuid.uuid4().hex[:12]),
+            build_platform, benchmark_runs, benchmark_warmup_runs,
+            load_layout_trials=resource_config.get("load_layout_trials", True))
+        unlocked_candidates.extend(resource_candidates)
+        stage_summaries.append({"stage": "PerformanceUnlock.BoundedResources",
+                                "candidate_count": len(resource_candidates),
+                                "accepted_count": sum(bool(c.get("accepted")) for c in resource_candidates)})
     best_candidate = choose_best_candidate([item for item in unlocked_candidates if item.get("accepted")])
     if best_candidate is None:
         best_candidate = choose_best_candidate(unlocked_candidates)
@@ -1158,7 +1280,7 @@ def run_unlocked_performance_phase(
         "summary": {
             "stage": "PerformanceUnlock",
             "phase": "performance_unlock",
-            "selection_mode": "size_aware_batch_unlock",
+            "selection_mode": "category_local_single_objective_unlock",
             "profile": profile,
             "input_correct_phase1_chain_count": len(phase1_top),
             "terminal_chain_count": len(unlocked_candidates),
@@ -1244,93 +1366,344 @@ def run_batch_unlock_for_terminal_candidate(
         code_dir=base_candidate.get("candidate_code_dir"),
     )
     matrix_profile = build_matrix_profile(base_ir)
-    phase2_index = build_phase2_unlock_strategy_index(
-        raw_strategy_index=raw_strategy_index,
-        ir=base_ir,
-        dependency_graph=dependency_graph,
-        history=base_history,
-        matrix_profile=matrix_profile,
-    )
-    code_dir = Path(base_candidate.get("candidate_code_dir") or chain_code_path(working_state["path"], working_state["path_code"], base_ir))
-    code_summary = build_unlock_code_summary(code_dir, backend_llm_context_files(base_ir), base_ir, base_history)
-    verifier_summary = build_unlock_verifier_summary(base_candidate)
-    batch_plan_error = None
-    try:
-        batch_plan = get_unlock_batch_plan_from_llm(
-            client=client,
-            strategy_index=phase2_index,
-            optir_summary=compact_ir_summary(base_ir),
-            code_summary=code_summary,
-            matrix_profile=matrix_profile,
-            verification_summary=verifier_summary,
-            user_question=user_question,
-        )
-    except Exception as exc:
-        batch_plan_error = {
-            "type": type(exc).__name__,
-            "message": str(exc),
-            "fallback": "deterministic_region_batches",
-        }
-        batch_plan = {"batches": fallback_unlock_batches(phase2_index.get("strategies", []) or [])}
-    batch_plan = sanitize_unlock_batch_plan(batch_plan, phase2_index, matrix_profile, base_history)
-    plan_record = {
-        "phase": "performance_unlock",
-        "profile": profile,
-        "base_chain_id": base_candidate.get("strategy_id"),
-        "base_code_dir": base_candidate.get("candidate_code_dir"),
-        "matrix_profile": matrix_profile,
-        "candidate_strategy_count": phase2_index.get("strategy_count", 0),
-        "batch_plan": batch_plan,
-        "batch_plan_error": batch_plan_error,
-        "verifier_summary": verifier_summary,
-    }
-    save_unlock_artifact(DEFAULT_UNLOCK_BATCH_PLAN_OUTPUT, base_candidate.get("strategy_id") or f"chain_{chain_index:04d}", None, plan_record)
-
     verified_candidates: list[dict[str, Any]] = []
     batch_summaries: list[dict[str, Any]] = []
-    for batch_number, batch in enumerate(batch_plan.get("batches", []) or [], start=1):
-        if not batch.get("strategy_ids"):
-            continue
-        result = run_unlock_batch(
-            working_state=working_state,
-            batch=batch,
-            batch_number=batch_number,
-            base_chain_id=base_candidate.get("strategy_id") or f"chain_{chain_index:04d}",
+    batch_plans: list[dict[str, Any]] = []
+    no_improvement_rounds = 0
+    compilation_count = 0
+    candidate_strategy_count = 0
+    from SGPO.generate_ir.unlock_feedback import choose_unlock_steps, infrastructure_failure
+    pending_steps = []
+    from SGPO.llm.unlock_category_selector import CATEGORIES, select_category_plan
+    category_visits = {}
+    stop_reason = "max_feedback_rounds_reached"
+    for round_index in range(1, FEEDBACK_SEARCH_LIMITS["max_rounds"] * len(CATEGORIES) + 1):
+        if compilation_count >= FEEDBACK_SEARCH_LIMITS["max_total_compilations"]:
+            stop_reason = "compilation_budget_exhausted"
+            break
+        round_ir = working_state["current_ir"]
+        matrix_profile = build_matrix_profile(round_ir)
+        round_history = working_state["history"]
+        phase2_index = build_phase2_unlock_strategy_index(
             raw_strategy_index=raw_strategy_index,
-            strategy_library=strategy_library,
-            client=client,
-            build_platform=build_platform,
-            compile_each_step=compile_each_step,
-            step_compile_timeout_seconds=step_compile_timeout_seconds,
-            benchmark_runs=benchmark_runs,
-            benchmark_warmup_runs=benchmark_warmup_runs,
+            ir=round_ir,
             dependency_graph=dependency_graph,
+            history=round_history,
+            matrix_profile=matrix_profile,
         )
-        batch_summaries.append(result["summary"])
-        verified_candidates.extend(result.get("verified_candidates", []) or [])
-        if result.get("accepted_state"):
-            working_state = result["accepted_state"]
+        candidate_strategy_count = phase2_index.get("strategy_count", 0)
+        if not candidate_strategy_count:
+            stop_reason = "no_remaining_unlock_candidates"
+            break
+        code_dir = Path(
+            working_state.get("code_dir")
+            or chain_code_path(working_state["path"], working_state["path_code"], round_ir)
+        )
+        code_summary = build_unlock_code_summary(
+            code_dir, backend_llm_context_files(round_ir), round_ir, round_history,
+        )
+        verifier_summary = build_unlock_verifier_summary(
+            working_state.get("last_candidate") or base_candidate
+        )
+        verifier_summary["feedback_failed_strategy_counts"] = dict(
+            round_history.get("failed_strategy_counts", {}) or {}
+        )
+        verifier_summary["failed_unlock_bundles"] = list(round_history.get("failed_unlock_bundles", []) or [])
+        verifier_summary["ineffective_unlock_bundles"] = list(
+            round_history.get("ineffective_unlock_bundles", []) or []
+        )
+        verifier_summary["recent_unlock_defect"] = {
+            "scope": "historical_attempt_not_necessarily_current_source",
+            "diagnosis": round_history.get("recent_unlock_defect"),
+        }
+        batch_plan_error = None
+        try:
+            batch_plan = select_category_plan(
+                client=client,
+                strategy_index=phase2_index,
+                visits=category_visits,
+                history=round_history,
+                max_visits=FEEDBACK_SEARCH_LIMITS["max_rounds"],
+                optir_summary=compact_ir_summary(round_ir),
+                code_summary=code_summary,
+                matrix_profile=matrix_profile,
+                verification_summary=verifier_summary,
+                user_question=user_question,
+            )
+        except Exception as exc:
+            batch_plan_error = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "fallback": "skip_category_selection_no_implicit_strategy",
+            }
+            batch_plan = {"batches": [], "selection_mode": "category_local"}
+        if not batch_plan_error and batch_plan.get("category") is None:
+            stop_reason = "category_candidates_or_visit_budget_exhausted"
+            break
+        plan_record = {
+            "phase": "performance_unlock",
+            "feedback_round": round_index,
+            "profile": profile,
+            "base_chain_id": base_candidate.get("strategy_id"),
+            "base_code_dir": str(code_dir),
+            "matrix_profile": matrix_profile,
+            "candidate_strategy_count": candidate_strategy_count,
+            "selected_strategy_ids": list(round_history.get("applied_strategy_ids", []) or []),
+            "unselected_strategy_ids": [
+                item.get("strategy_id") for item in phase2_index.get("strategies", []) or []
+            ],
+            "batch_plan": batch_plan,
+            "batch_plan_error": batch_plan_error,
+            "verifier_summary": verifier_summary,
+            "dynamic_dependency_overlay": build_dynamic_dependency_overlay(batch_plan),
+            "feedback_limits": dict(FEEDBACK_SEARCH_LIMITS),
+        }
+        round_batches, pending_steps, dropped_steps = choose_unlock_steps(
+            pending_steps, batch_plan.get("batches", []),
+            {item.get("strategy_id") for item in phase2_index.get("strategies", [])},
+            round_history, FEEDBACK_SEARCH_LIMITS["experiments_per_round"],
+        )
+        plan_record["execution_granularity"] = "single_objective_coupled_regions"
+        plan_record["category_visits"] = dict(category_visits)
+        plan_record["execution_steps"] = copy.deepcopy(round_batches)
+        plan_record["pending_steps"] = copy.deepcopy(pending_steps)
+        plan_record["pending_steps_filtered"] = dropped_steps
+        batch_plans.append(plan_record)
+        save_unlock_artifact(
+            DEFAULT_UNLOCK_BATCH_PLAN_OUTPUT,
+            f"{base_candidate.get('strategy_id') or f'chain_{chain_index:04d}'}.round_{round_index}",
+            None,
+            plan_record,
+        )
+
+        round_improved = False
+        round_has_measurements = False
+        infrastructure_blocked = False
+        for local_batch_number, batch in enumerate(round_batches, start=1):
+            if not batch.get("strategy_ids"):
+                continue
+            if compilation_count >= FEEDBACK_SEARCH_LIMITS["max_total_compilations"]:
+                pending_steps = round_batches[local_batch_number - 1:] + pending_steps
+                break
+            try:
+                result = run_unlock_batch(
+                    working_state=working_state,
+                    batch=batch,
+                    batch_number=(round_index - 1) * FEEDBACK_SEARCH_LIMITS["experiments_per_round"] + local_batch_number,
+                    base_chain_id=base_candidate.get("strategy_id") or f"chain_{chain_index:04d}",
+                    raw_strategy_index=raw_strategy_index,
+                    strategy_library=strategy_library,
+                    client=client,
+                    build_platform=build_platform,
+                    compile_each_step=compile_each_step,
+                    step_compile_timeout_seconds=step_compile_timeout_seconds,
+                    benchmark_runs=benchmark_runs,
+                    benchmark_warmup_runs=benchmark_warmup_runs,
+                    dependency_graph=dependency_graph,
+                    compilation_budget=unlock_experiment_compilation_budget(
+                        round_index=round_index,
+                        local_batch_number=local_batch_number,
+                        compilation_count=compilation_count,
+                    ),
+                )
+            except Exception as exc:
+                failure = {
+                    "stage": "PerformanceUnlock",
+                    "phase": "unlock_candidate_execution",
+                    "status": "failed",
+                    "batch_id": batch.get("batch_id"),
+                    "strategy_ids": list(batch.get("strategy_ids", []) or []),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "feedback_round": round_index,
+                    "rolled_back": True,
+                }
+                save_unlock_artifact(
+                    DEFAULT_UNLOCK_BATCH_DEFECT_OUTPUT,
+                    base_candidate.get("strategy_id") or f"chain_{chain_index:04d}",
+                    batch.get("batch_id"),
+                    failure,
+                )
+                batch_summaries.append(failure)
+                record_unlock_feedback(
+                    working_state,
+                    batch,
+                    {"summary": failure, "verified_candidates": [], "compilation_count": 0},
+                    round_index,
+                )
+                if infrastructure_failure(failure):
+                    pending_steps = round_batches[local_batch_number - 1:] + pending_steps
+                    infrastructure_blocked = True
+                    break
+                continue
+            result["summary"]["feedback_round"] = round_index
+            compilation_count += int(result.get("compilation_count", 0) or 0)
+            batch_summaries.append(result["summary"])
+            verified_candidates.extend(result.get("verified_candidates", []) or [])
+            round_has_measurements |= any(
+                candidate.get("accepted") and candidate_gflops(candidate) is not None
+                for candidate in result.get("verified_candidates", []) or []
+            )
+            if infrastructure_failure(result["summary"]):
+                record_unlock_feedback(working_state, batch, result, round_index)
+                pending_steps = round_batches[local_batch_number - 1:] + pending_steps
+                infrastructure_blocked = True
+                break
+            if result.get("accepted_state"):
+                working_state = result["accepted_state"]
+                round_improved = True
+            else:
+                record_unlock_feedback(working_state, batch, result, round_index)
+        if infrastructure_blocked:
+            stop_reason = "infrastructure_error_pending_work_preserved"
+            break
+        if round_improved:
+            no_improvement_rounds = 0
+        elif round_has_measurements:
+            no_improvement_rounds += 1
+        if (no_improvement_rounds >= FEEDBACK_SEARCH_LIMITS["no_improvement_patience"]
+                and not pending_steps and not batch_plan.get("unvisited_categories") and not batch_plan_error):
+            stop_reason = "no_performance_improvement_patience_exhausted"
+            break
+        if compilation_count >= FEEDBACK_SEARCH_LIMITS["max_total_compilations"]:
+            stop_reason = "compilation_budget_exhausted"
+            break
 
     return {
         "base_chain_id": base_candidate.get("strategy_id"),
         "base_code_dir": base_candidate.get("candidate_code_dir"),
         "matrix_profile": matrix_profile,
-        "batch_plan": batch_plan,
+        "batch_plan": batch_plans[-1]["batch_plan"] if batch_plans else {"batches": []},
+        "feedback_rounds": batch_plans,
         "verified_candidates": verified_candidates,
         "final_state": working_state,
         "summary": {
             "stage": "PerformanceUnlock",
             "phase": "performance_unlock",
             "base_chain_id": base_candidate.get("strategy_id"),
-            "candidate_strategy_count": phase2_index.get("strategy_count", 0),
-            "planned_batch_count": len(batch_plan.get("batches", []) or []),
+            "candidate_strategy_count": candidate_strategy_count,
+            "planned_batch_count": sum(len(item["batch_plan"].get("batches", []) or []) for item in batch_plans),
+            "feedback_round_count": len(batch_plans),
             "verified_candidate_count": len(verified_candidates),
             "accepted_candidate_count": len([item for item in verified_candidates if item.get("accepted")]),
             "best_gflops": candidate_gflops(choose_best_candidate(verified_candidates)),
             "matrix_profile": matrix_profile,
             "batch_summaries": batch_summaries,
+            "stopped_after_no_improvement": stop_reason == "no_performance_improvement_patience_exhausted",
+            "compilation_count": compilation_count,
+            "compilation_budget": FEEDBACK_SEARCH_LIMITS["max_total_compilations"],
+            "stop_reason": stop_reason,
+            "pending_steps": copy.deepcopy(pending_steps),
         },
     }
+
+
+def unlock_experiment_compilation_budget(
+    round_index: int,
+    local_batch_number: int,
+    compilation_count: int,
+) -> int:
+    remaining_budget = max(1, FEEDBACK_SEARCH_LIMITS["max_total_compilations"] - compilation_count)
+    completed_slots = (
+        (round_index - 1) * FEEDBACK_SEARCH_LIMITS["experiments_per_round"]
+        + local_batch_number - 1
+    )
+    total_slots = FEEDBACK_SEARCH_LIMITS["max_rounds"] * FEEDBACK_SEARCH_LIMITS["experiments_per_round"]
+    remaining_slots_after_current = max(0, total_slots - completed_slots - 1)
+    # Reserve one compile for every future experiment. The remaining three
+    # compiles are distributed as one repair opportunity per feedback round.
+    repair_bonus = 1 if local_batch_number == 1 and remaining_budget > remaining_slots_after_current + 1 else 0
+    return min(remaining_budget, 1 + repair_bonus)
+
+
+def record_unlock_feedback(
+    working_state: dict[str, Any],
+    batch: dict[str, Any],
+    result: dict[str, Any],
+    round_index: int,
+) -> None:
+    history = working_state.setdefault("history", {})
+    strategy_ids = sorted(set(batch.get("strategy_ids", []) or []))
+    summary = result.get("summary", {}) or {}
+    from SGPO.generate_ir.unlock_feedback import infrastructure_failure
+    if infrastructure_failure(summary):
+        history.setdefault("infrastructure_failures", []).append({
+            "feedback_round": round_index, "strategy_ids": strategy_ids,
+            "batch_id": batch.get("batch_id"), "summary": copy.deepcopy(summary),
+        })
+        history.setdefault("events", []).append({
+            "stage": "PerformanceUnlock", "status": "infrastructure_error",
+            "strategy_ids": strategy_ids, "feedback_round": round_index,
+        })
+        return
+    status = summary.get("status") or "failed"
+    bundle_key = "|".join(strategy_ids)
+    bucket = "ineffective_unlock_bundles" if status in {"verified_without_performance_improvement", "unchanged_implementation"} else "failed_unlock_bundles"
+    bundles = history.setdefault(bucket, [])
+    if bundle_key and bundle_key not in bundles:
+        bundles.append(bundle_key)
+    if bucket == "failed_unlock_bundles":
+        failed_counts = history.setdefault("failed_strategy_counts", {})
+        for strategy_id in strategy_ids:
+            failed_counts[strategy_id] = failed_counts.get(strategy_id, 0) + 1
+    recent_defect = summary.get("last_defect_diagnosis") or summary.get("defect_diagnosis")
+    if recent_defect:
+        history["recent_unlock_defect"] = recent_defect
+    history.setdefault("events", []).append(
+        {
+            "stage": "PerformanceUnlock",
+            "feedback_round": round_index,
+            "batch_id": batch.get("batch_id"),
+            "strategy_ids": strategy_ids,
+            "status": status,
+            "reason": summary.get("reason"),
+        }
+    )
+    strategy_state = working_state.setdefault("current_ir", {}).setdefault("strategy", {})
+    strategy_state["failed_strategy_counts"] = dict(history.get("failed_strategy_counts", {}) or {})
+    strategy_state["failed_unlock_bundles"] = list(history.get("failed_unlock_bundles", []) or [])
+    strategy_state["ineffective_unlock_bundles"] = list(history.get("ineffective_unlock_bundles", []) or [])
+
+
+def build_dynamic_dependency_overlay(batch_plan: dict[str, Any]) -> dict[str, Any]:
+    """Represent the LLM plan as a per-chain soft ordering over static hard dependencies."""
+    batches = batch_plan.get("batches", []) or []
+    nodes = []
+    edges = []
+    previous_ids: list[str] = []
+    for batch in batches:
+        strategy_ids = list(batch.get("strategy_ids", []) or [])
+        nodes.extend(strategy_id for strategy_id in strategy_ids if strategy_id not in nodes)
+        for source in previous_ids:
+            for target in strategy_ids:
+                edges.append({"from": source, "to": target, "kind": "llm_soft_order"})
+        previous_ids = strategy_ids
+    return {
+        "scope": "current_chain_only",
+        "nodes": nodes,
+        "edges": edges,
+        "hard_dependencies_unchanged": True,
+    }
+
+
+def expand_unlock_plan_to_strategy_steps(batch_plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep LLM batch ordering, but execute every strategy as an isolated transaction."""
+    steps: list[dict[str, Any]] = []
+    for batch in batch_plan.get("batches", []) or []:
+        strategy_ids = list(batch.get("strategy_ids", []) or [])
+        for step_index, strategy_id in enumerate(strategy_ids, start=1):
+            steps.append(
+                {
+                    **batch,
+                    "batch_id": f"{safe_batch_id(batch.get('batch_id') or 'batch')}.s{step_index}",
+                    "planning_batch_id": safe_batch_id(batch.get("batch_id") or "batch"),
+                    "strategy_ids": [strategy_id],
+                    "execution_granularity": "single_strategy",
+                    "step_index": step_index,
+                    "step_count": len(strategy_ids),
+                }
+            )
+    return steps
 
 
 def run_unlock_batch(
@@ -1347,13 +1720,19 @@ def run_unlock_batch(
     benchmark_runs: int,
     benchmark_warmup_runs: int,
     dependency_graph: dict[str, Any] | None = None,
+    compilation_budget: int | None = None,
 ) -> dict[str, Any]:
     verified_candidates: list[dict[str, Any]] = []
-    attempted_bundles = [batch, *build_unlock_fallback_batches(batch, dependency_graph)]
+    compilation_count = 0
+    attempted_bundles = [batch, *build_unlock_fallback_batches(batch, dependency_graph)][
+        : FEEDBACK_SEARCH_LIMITS["max_rollback_depth"] + 1
+    ]
     last_result: dict[str, Any] | None = None
     last_verified_ir: dict[str, Any] | None = None
     last_diagnosis: dict[str, Any] | None = None
     for fallback_index, bundle in enumerate(attempted_bundles, start=0):
+        if compilation_budget is not None and compilation_count >= compilation_budget:
+            break
         strategy_ids = bundle.get("strategy_ids", []) or []
         if not strategy_ids:
             continue
@@ -1382,9 +1761,11 @@ def run_unlock_batch(
             fallback_index + 1,
         ]
         namespace = chain_code_key(chain_code)
+        from SGPO.verification.locked_repair import begin_optimization_transaction
+        optimization_ir = begin_optimization_transaction(working_state["current_ir"])
         candidate_result = run_strategy_candidate(
             stage="PerformanceUnlock",
-            base_ir=working_state["current_ir"],
+            base_ir=optimization_ir,
             base_source_snapshot=working_state["source_snapshot"],
             strategy=bundle_strategy,
             precheck_item=precheck_item,
@@ -1408,10 +1789,40 @@ def run_unlock_batch(
                 bundle.get("batch_id"),
                 last_diagnosis or {"status": "generation_failed", "strategy_ids": strategy_ids},
             )
+            from SGPO.generate_ir.unlock_feedback import infrastructure_failure
+            last_verification = (last_verified_ir or {}).get("verification", {}).get("summary", {})
+            if infrastructure_failure(last_verification):
+                failure = {
+                    "base_chain_id": base_chain_id, "batch_id": bundle.get("batch_id"),
+                    "strategy_ids": strategy_ids, "accepted": False,
+                    "status": "infrastructure_error", "failure_class": "infrastructure_error",
+                    "reason": "Execution infrastructure failed; no strategy performance conclusion",
+                    "last_verification": last_verification,
+                }
+                save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, bundle.get("batch_id"), failure)
+                return {"accepted_state": None, "verified_candidates": verified_candidates,
+                        "summary": failure, "compilation_count": compilation_count}
             continue
 
         chain_dir = Path(candidate_result["candidate_code_dir"])
         terminal_ir = copy.deepcopy(candidate_result["verified_ir"])
+        if 'Compiler.FastMath.Enabled' in strategy_ids:
+            terminal_ir.setdefault('compiler', {})['use_fast_math'] = True
+        from SGPO.verification.implementation_identity import unchanged_verified_parent
+        duplicate = unchanged_verified_parent(
+            working_state['current_ir'], working_state['source_snapshot'], terminal_ir,
+            snapshot_source_files(chain_dir, backend_code_files(terminal_ir)), build_platform)
+        if duplicate:
+            result_record = {
+                'base_chain_id': base_chain_id, 'batch_id': bundle.get('batch_id'),
+                'strategy_ids': strategy_ids, 'status': 'unchanged_implementation',
+                'accepted': False, 'runtime_correct_parent_retained': True,
+                'candidate_code_dir': str(chain_dir), 'implementation_fingerprint': duplicate,
+                'reason': 'Effective source and CUDA options match the verified parent; no new benchmark or strategy benefit claimed.',
+            }
+            save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, bundle.get('batch_id'), result_record)
+            return {'accepted_state': None, 'verified_candidates': verified_candidates,
+                    'summary': result_record, 'compilation_count': compilation_count}
         terminal_ir.setdefault("strategy", {})["applied_strategy_ids"] = append_unique(
             working_state["history"].get("applied_strategy_ids", []),
             strategy_ids,
@@ -1419,6 +1830,11 @@ def run_unlock_batch(
         terminal_ir.setdefault("strategy", {})["chain_id"] = f"{base_chain_id}.{bundle.get('batch_id')}"
         terminal_ir.setdefault("strategy", {})["chain_code"] = chain_code_key(chain_code)
         terminal_ir.setdefault("strategy", {})["chain_path"] = chain_path
+        from SGPO.verification.locked_repair import locked_tile_parameters
+        terminal_ir['locked_repair_contract'] = {
+            'strategy_ids': list(terminal_ir['strategy']['applied_strategy_ids']),
+            'tile_parameters': locked_tile_parameters(terminal_ir, working_state['source_snapshot'].get('cuda_kernel.cuh', '')),
+        }
         verified_ir = verify_terminal_chain_once(
             terminal_ir=terminal_ir,
             chain_dir=chain_dir,
@@ -1429,10 +1845,51 @@ def run_unlock_batch(
             benchmark_runs=benchmark_runs,
             benchmark_warmup_runs=benchmark_warmup_runs,
         )
+        compilation_count += 1
         repair_attempts = []
+        repair_baseline_snapshot = snapshot_source_files(chain_dir, backend_code_files(terminal_ir))
+        seen_repair_hashes: set[str] = set()
+        from SGPO.verification.strategy_application import strategy_application
+        def retain_runtime_candidate(ir, suffix):
+            if not terminal_chain_is_accepted(ir):
+                return
+            preserved_dir = chain_dir / ('retained_' + suffix)
+            snapshot = snapshot_source_files(chain_dir, backend_code_files(ir))
+            restore_source_files(preserved_dir, snapshot)
+            saved_ir = copy.deepcopy(ir)
+            application = strategy_application(saved_ir, strategy_ids)
+            saved_ir['strategy_application'] = application
+            history = copy_history(working_state['history'])
+            history['selected_strategy_ids'] = append_unique(history.get('selected_strategy_ids', []), strategy_ids)
+            history['applied_strategy_ids'] = append_unique(history.get('applied_strategy_ids', []), application['realized_strategy_ids'])
+            save_json(preserved_dir / 'verified_ir.json', saved_ir)
+            verified_candidates.append({
+                'accepted': True, 'stage': 'PerformanceUnlock',
+                'strategy_id': f"{base_chain_id}.{bundle.get('batch_id')}.{suffix}",
+                'verified_ir': saved_ir, 'source_snapshot': snapshot,
+                'candidate_code_dir': str(preserved_dir), 'history': history,
+                'path': chain_path, 'path_code': chain_code, 'source_phase': 'performance_unlock',
+            })
         for repair_attempt in range(1, DEFAULT_UNLOCK_BATCH_REPAIR_ATTEMPTS + 1):
-            if terminal_chain_is_accepted(verified_ir):
+            application = strategy_application(verified_ir, strategy_ids)
+            if terminal_chain_is_accepted(verified_ir) and not application['repair_required']:
                 break
+            retain_runtime_candidate(verified_ir, f'before_repair_{repair_attempt}')
+            if application['repair_required']:
+                diagnosis = verified_ir.setdefault('defect_diagnosis', {})
+                diagnosis.setdefault('defects', []).append({
+                    'defect_type': 'StrategyImplementation.MissingSelectedOptimization',
+                    'related_strategy': ','.join(application['missing_strategy_ids']),
+                    'repair_action': 'Implement the selected optimization without removing other optimizations. Preserve runtime correctness.',
+                    'evidence': application,
+                })
+                diagnosis['defect_count'] = len(diagnosis['defects'])
+            if compilation_budget is not None and compilation_count >= compilation_budget:
+                break
+            before_repair_ir = copy.deepcopy(verified_ir)
+            before_repair_source = snapshot_source_files(chain_dir, backend_code_files(verified_ir))
+            save_json(chain_dir / f"unlock_repair_checkpoint_{repair_attempt}.json",
+                      {"ir": before_repair_ir, "source_snapshot": before_repair_source})
             repair_result = repair_chain_locally(
                 source_chain_dir=chain_dir,
                 output_chain_dir=chain_dir,
@@ -1440,10 +1897,31 @@ def run_unlock_batch(
                 ir=verified_ir,
                 client=client,
                 strategy_library=strategy_library,
+                repair_attempt=repair_attempt,
+                baseline_snapshot=repair_baseline_snapshot,
             )
             repair_result["repair_attempt"] = repair_attempt
             save_json(chain_dir / f"unlock_semantic_repair_attempt_{repair_attempt}.json", repair_result)
             repair_attempts.append(repair_result)
+            repair_hash = repair_result.get("source_hash_after")
+            if repair_result.get("status") != "repair_generated" or not repair_hash:
+                verified_ir["repair_feedback"] = repair_result
+                if repair_result.get("status") == "repair_failed":
+                    continue
+                break
+            if repair_hash in seen_repair_hashes:
+                repair_result["status"] = "repair_retry_no_progress"
+                repair_result["reason"] = "repair produced a previously tested source snapshot"
+                restore_source_files(chain_dir, before_repair_source)
+                verified_ir = before_repair_ir
+                verified_ir["repair_feedback"] = repair_result
+                save_json(chain_dir / f"unlock_semantic_repair_attempt_{repair_attempt}.json", repair_result)
+                continue
+            seen_repair_hashes.add(repair_hash)
+            verified_ir["locked_repair_contract"] = {
+                "strategy_ids": repair_result.get("locked_strategy_ids", []),
+                "tile_parameters": repair_result.get("locked_tile_parameters", {}),
+            }
             verified_ir = verify_terminal_chain_once(
                 terminal_ir=verified_ir,
                 chain_dir=chain_dir,
@@ -1454,12 +1932,42 @@ def run_unlock_batch(
                 benchmark_runs=benchmark_runs,
                 benchmark_warmup_runs=benchmark_warmup_runs,
             )
+            compilation_count += 1
+            from SGPO.verification.repair_transaction import finish_repair
+            verified_ir, rollback = finish_repair(
+                before_repair_ir, verified_ir, before_repair_source,
+                snapshot_source_files(chain_dir, backend_code_files(verified_ir)),
+                repair_result, terminal_chain_is_accepted(verified_ir)
+                and strategy_application(verified_ir, strategy_ids)['continuation_allowed'])
+            if rollback:
+                restore_source_files(chain_dir, before_repair_source)
+            save_json(chain_dir / f"unlock_semantic_repair_attempt_{repair_attempt}.json", repair_result)
         if repair_attempts:
             verified_ir.setdefault("terminal_repair", {})["attempts"] = repair_attempts
             verified_ir.setdefault("terminal_repair", {})["attempt_count"] = len(repair_attempts)
+        # A repair may restore the parent verbatim. Its fresh timing must not
+        # be credited as a new optimization merely because it ran faster.
+        duplicate = unchanged_verified_parent(
+            working_state['current_ir'], working_state['source_snapshot'], verified_ir,
+            snapshot_source_files(chain_dir, backend_code_files(verified_ir)), build_platform)
+        if duplicate:
+            result_record = {
+                'base_chain_id': base_chain_id, 'batch_id': bundle.get('batch_id'),
+                'strategy_ids': strategy_ids, 'status': 'unchanged_implementation',
+                'accepted': False, 'runtime_correct_parent_retained': True,
+                'candidate_code_dir': str(chain_dir), 'implementation_fingerprint': duplicate,
+                'reason': 'Repair produced the parent implementation; measured timing is not a strategy gain.',
+                'repair_attempt_count': len(repair_attempts),
+            }
+            save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, bundle.get('batch_id'), result_record)
+            return {'accepted_state': None, 'verified_candidates': verified_candidates,
+                    'summary': result_record, 'compilation_count': compilation_count}
         accepted = terminal_chain_is_accepted(verified_ir)
+        application = strategy_application(verified_ir, strategy_ids)
+        verified_ir['strategy_application'] = application
         history = copy_history(working_state["history"])
-        history["applied_strategy_ids"] = append_unique(history.get("applied_strategy_ids", []), strategy_ids)
+        history['selected_strategy_ids'] = append_unique(history.get('selected_strategy_ids', []), strategy_ids)
+        history["applied_strategy_ids"] = append_unique(history.get("applied_strategy_ids", []), application['realized_strategy_ids'])
         history.setdefault("events", []).append(
             {
                 "stage": "PerformanceUnlock",
@@ -1493,9 +2001,15 @@ def run_unlock_batch(
             "verification": verified_ir.get("verification", {}).get("summary", {}),
             "performance": verified_ir.get("performance", {}),
             "defect_diagnosis": verified_ir.get("defect_diagnosis", {}),
+            "strategy_application": application,
         }
         save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, bundle.get("batch_id"), result_record)
         save_unlock_artifact(DEFAULT_UNLOCK_BATCH_DEFECT_OUTPUT, base_chain_id, bundle.get("batch_id"), verified_ir.get("defect_diagnosis", {}))
+        if accepted and not application['continuation_allowed']:
+            result_record['status'] = 'retained_runtime_only_' + application['status']
+            save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, bundle.get('batch_id'), result_record)
+            return {'accepted_state': None, 'verified_candidates': verified_candidates,
+                    'summary': result_record, 'compilation_count': compilation_count}
         if accepted:
             improved = candidate_gflops(candidate) is not None and (
                 candidate_gflops(working_state.get("last_candidate")) is None
@@ -1504,7 +2018,12 @@ def run_unlock_batch(
             if not improved:
                 result_record["status"] = "verified_without_performance_improvement"
                 save_unlock_artifact(DEFAULT_UNLOCK_BATCH_RESULT_OUTPUT, base_chain_id, bundle.get("batch_id"), result_record)
-                return {"accepted_state": None, "verified_candidates": verified_candidates, "summary": result_record}
+                return {
+                    "accepted_state": None,
+                    "verified_candidates": verified_candidates,
+                    "summary": result_record,
+                    "compilation_count": compilation_count,
+                }
             accepted_state = make_frontier_state(
                 state_id=f"{working_state['state_id']}->{safe_name(str(bundle.get('batch_id')))}",
                 current_ir=verified_ir,
@@ -1519,6 +2038,7 @@ def run_unlock_batch(
                 "accepted_state": accepted_state,
                 "verified_candidates": verified_candidates,
                 "summary": result_record,
+                "compilation_count": compilation_count,
             }
         last_verified_ir = verified_ir
         last_diagnosis = verified_ir.get("defect_diagnosis", {})
@@ -1539,6 +2059,7 @@ def run_unlock_batch(
         "verified_candidates": verified_candidates,
         "last_result": last_result,
         "summary": rollback_record,
+        "compilation_count": compilation_count,
     }
 
 
@@ -1640,24 +2161,13 @@ def build_phase2_unlock_strategy_index(
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     seen_canonical: set[str] = set()
-    dynamic_id = "Memory.SharedMemory.DynamicOptIn"
-    dynamic_strategy = next((s for s in raw_strategy_index.get("strategies", []) if s.get("strategy_id") == dynamic_id), None)
-    dynamic_eligible = dynamic_strategy is not None and phase2_unlock_reject_reason(
-        dynamic_strategy, strategy_phase(dynamic_strategy), ir, applied, set(), dependency_graph,
-        matrix_profile, failed_counts) is None
     for strategy in raw_strategy_index.get("strategies", []) or []:
         strategy_id = strategy.get("strategy_id")
         phase = strategy_phase(strategy)
-        selection_ir = ir
-        requires_dynamic = False
-        if dynamic_eligible and str(strategy_id).startswith("Pipeline.CpAsync.") and resource_profile_reject_reason(strategy_id, ir, matrix_profile):
-            selection_ir = copy.deepcopy(ir)
-            selection_ir.setdefault("memory", {}).update(shared_memory_allocation="dynamic", shared_memory_optin=True)
-            requires_dynamic = True
         reason = phase2_unlock_reject_reason(
             strategy=strategy,
             phase=phase,
-            ir=selection_ir,
+            ir=ir,
             applied=applied,
             seen_canonical=seen_canonical,
             dependency_graph=dependency_graph,
@@ -1676,8 +2186,6 @@ def build_phase2_unlock_strategy_index(
         item.setdefault("provides_fields", infer_provides_fields(item))
         item.setdefault("requires_fields", infer_requires_fields(item))
         item["filter_reason"] = "eligible for size-aware batch unlock"
-        if requires_dynamic:
-            item["requires_bundle_strategy_ids"] = [dynamic_id]
         accepted.append(item)
         seen_canonical.add(canonical_strategy_id(item))
     result = copy.deepcopy(raw_strategy_index)
@@ -1713,6 +2221,8 @@ def phase2_unlock_reject_reason(
         return "already applied"
     if strategy.get("alias_of"):
         return f"alias of {strategy.get('alias_of')}; canonical strategy only"
+    if (strategy.get("materialization") or {}).get("mode") == "bounded_resource_unlock":
+        return "executed by the bounded post-unlock resource executor, not an LLM patch"
     if phase == EXCLUDED_DEFAULT_PHASE:
         return "excluded_default phase"
     if phase not in {PHASE2_GENERAL, PHASE2_LARGE_MATRIX}:
@@ -1724,6 +2234,10 @@ def phase2_unlock_reject_reason(
         return f"duplicate canonical strategy: {canonical}"
     if failed_counts.get(strategy_id, 0) >= DEFAULT_MAX_REPAIR_ATTEMPTS:
         return "strategy failed too many times"
+    from SGPO.verification.strategy_application import unproven_dependencies
+    unproven = unproven_dependencies(ir, dependency_graph.get('requires', {}).get(strategy_id, []))
+    if unproven:
+        return 'requires unproven implementation capabilities: ' + '; '.join(unproven)
     missing_graph = find_missing_requirements(strategy_id, ir, applied, dependency_graph)
     if missing_graph:
         return f"missing graph requirements: {'; '.join(missing_graph)}"
@@ -1769,6 +2283,9 @@ def sanitize_unlock_batch_plan(
 ) -> dict[str, Any]:
     valid_by_id = {item["strategy_id"]: item for item in strategy_index.get("strategies", []) or []}
     applied = set(history.get("applied_strategy_ids", []) or [])
+    attempted_bundle_keys = set(history.get("failed_unlock_bundles", []) or []) | set(
+        history.get("ineffective_unlock_bundles", []) or []
+    )
     plan_batches = batch_plan.get("batches") if isinstance(batch_plan, dict) else None
     if not isinstance(plan_batches, list):
         plan_batches = []
@@ -1804,7 +2321,8 @@ def sanitize_unlock_batch_plan(
             seen_ids.add(strategy_id)
             if conflict_group:
                 batch_conflicts.add(conflict_group)
-        if selected_ids:
+        bundle_key = "|".join(sorted(set(selected_ids)))
+        if selected_ids and bundle_key not in attempted_bundle_keys:
             global_selected_conflicts.update(batch_conflicts)
             cleaned_batches.append(
                 {
@@ -1818,7 +2336,10 @@ def sanitize_unlock_batch_plan(
                 }
             )
     if not cleaned_batches and valid_by_id:
-        cleaned_batches = fallback_unlock_batches(list(valid_by_id.values()))
+        cleaned_batches = [
+            batch for batch in fallback_unlock_batches(list(valid_by_id.values()))
+            if "|".join(sorted(set(batch.get("strategy_ids", []) or []))) not in attempted_bundle_keys
+        ]
     for batch in cleaned_batches:
         needed = {required for sid in batch["strategy_ids"]
                   for required in valid_by_id[sid].get("requires_bundle_strategy_ids", [])}
@@ -1829,6 +2350,10 @@ def sanitize_unlock_batch_plan(
                 if other is not batch and required in other["strategy_ids"]:
                     other["strategy_ids"].remove(required)
     ensure_async_pipeline_exploration_batch(cleaned_batches, valid_by_id, matrix_profile, applied)
+    cleaned_batches = [
+        batch for batch in cleaned_batches
+        if "|".join(sorted(set(batch.get("strategy_ids", []) or []))) not in attempted_bundle_keys
+    ]
     executor_id = "Compiler.ResourceFeedback.PtxasOccupancySweep"
     executor_selected = any(executor_id in batch["strategy_ids"] for batch in cleaned_batches)
     for batch in cleaned_batches:
@@ -1860,8 +2385,8 @@ def ensure_async_pipeline_exploration_batch(
     if any(strategy_id.startswith("Pipeline.CpAsync.") for strategy_id in selected):
         return
     preferred_ids = (
-        "Pipeline.CpAsync.Multistage3.SharedAB",
         "Pipeline.CpAsync.Multistage2.SharedAB",
+        "Pipeline.CpAsync.Multistage3.SharedAB",
         "Pipeline.CpAsync.Multistage4.SharedAB",
     )
     strategy_id = next((item for item in preferred_ids if item in valid_by_id), None)
@@ -1905,6 +2430,9 @@ def fallback_unlock_batches(strategies: list[dict[str, Any]]) -> list[dict[str, 
 
 
 def build_unlock_fallback_batches(batch: dict[str, Any], dependency_graph: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if batch.get("execution_granularity") == "single_objective_coupled_regions":
+        # Repair the complete objective; alternative strategies are selected afresh.
+        return []
     fallbacks = []
     for index, strategy_id in enumerate(batch.get("strategy_ids", []) or [], start=1):
         if len(batch.get("strategy_ids", [])) == 1:
@@ -1925,11 +2453,9 @@ def build_unlock_fallback_batches(batch: dict[str, Any], dependency_graph: dict[
                 if (fallback_id,) in seen:
                     continue
                 seen.add((fallback_id,))
-                fallback_ids = [fallback_id]
-                if "Memory.SharedMemory.DynamicOptIn" in batch.get("strategy_ids", []) and fallback_id.startswith("Pipeline."):
-                    fallback_ids.insert(0, "Memory.SharedMemory.DynamicOptIn")
                 fallbacks.append({**batch, "batch_id": f"{batch.get('batch_id')}_graph_{len(fallbacks)+1}",
-                                  "strategy_ids": fallback_ids, "purpose": f"graph fallback for {strategy_id}"})
+                                  "strategy_ids": [fallback_id], "purpose": f"graph fallback for {strategy_id}",
+                                  "execution_granularity": "single_strategy"})
     return fallbacks
 
 
@@ -1940,6 +2466,13 @@ def build_unlock_bundle_strategy(
 ) -> dict[str, Any]:
     strategy_ids = batch.get("strategy_ids", []) or []
     strategies = [find_strategy_object(strategy_id, raw_strategy_index, strategy_library) for strategy_id in strategy_ids]
+    if len(strategies) == 1:
+        strategy = copy.deepcopy(strategies[0])
+        strategy["unlock_execution"] = {
+            "planning_batch_id": batch.get("planning_batch_id") or batch.get("batch_id"),
+            "execution_granularity": "single_strategy",
+        }
+        return strategy
     merged_updates: dict[str, Any] = {}
     for strategy in strategies:
         merged_updates.update(copy.deepcopy(strategy.get("ir_updates", {}) or {}))
@@ -2036,6 +2569,7 @@ def build_unlock_code_summary(
         )
     return {
         "code_dir": str(code_dir),
+        "strategy_contract_state": ir.get('strategy_contract_state', {}),
         "applied_strategy_ids": history.get("applied_strategy_ids", []) or ir.get("strategy", {}).get("applied_strategy_ids", []),
         "tile_config": {
             "BM": ir_get(ir, "tiling.block_m"),
@@ -2063,6 +2597,7 @@ def build_unlock_code_summary(
 
 
 def build_unlock_verifier_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    from SGPO.verification.unlock_evidence import classify_diagnosis
     verified_ir = candidate.get("verified_ir", {}) or {}
     summary = verified_ir.get("verification", {}).get("summary", {}) or {}
     return {
@@ -2072,11 +2607,30 @@ def build_unlock_verifier_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "cuda_error": summary.get("cuda_error"),
         "latency_ms": summary.get("latency_ms") or verified_ir.get("performance", {}).get("latency_ms"),
         "gflops": summary.get("gflops") or verified_ir.get("performance", {}).get("gflops"),
-        "semantic_defect_summary": verified_ir.get("defect_diagnosis", {}),
+        "semantic_defect_summary": classify_diagnosis(verified_ir.get("defect_diagnosis", {}), summary),
+        "strategy_contract_state": verified_ir.get('strategy_contract_state', {}),
+        "tuning_observations": tuning_observations(verified_ir),
         "resource_estimate": verified_ir.get("resource", {}),
         "failed_strategy_counts": verified_ir.get("strategy", {}).get("failed_strategy_counts", {}),
         "current_changed_regions": verified_ir.get("strategy", {}).get("changed_regions", []),
     }
+
+
+def tuning_observations(ir: dict[str, Any]) -> dict[str, Any]:
+    profile = build_matrix_profile(ir)
+    observations = []
+    ctas = profile.get('cta_count')
+    sm_count = ir_get(ir, 'hardware.sm_count') or ir_get(ir, 'hardware.multiprocessor_count')
+    if isinstance(ctas, (int, float)) and isinstance(sm_count, (int, float)) and 0 < ctas < sm_count:
+        observations.append('Fewer CTAs than SMs: compare smaller Block tiles with coupled Warp/Thread mapping; do not assume Split-K is profitable.')
+    registers = ir_get(ir, 'verification.compile.ptxas_resources.register_counts', []) or []
+    if registers and max(registers) >= 96:
+        observations.append('High measured register count: compare fragment size, unroll and prefetch depth; confirm occupancy/spills before attributing the bottleneck.')
+    pending = ir.get('strategy_contract_state', {}).get('pending_obligations', [])
+    if any(item.get('status') in ('degraded', 'not_realized') for item in pending):
+        observations.append('Resolve explicit strategy degradation/missing implementation before stacking dependent optimizations.')
+    return {'basis': 'resource observations, not profiler-proven bottlenecks',
+            'matrix_profile': profile, 'suggested_controlled_comparisons': observations}
 
 
 def strategy_phase(strategy: dict[str, Any]) -> str:
@@ -2103,6 +2657,9 @@ def infer_strategy_phase(strategy_id: str) -> str:
         "Pipeline.DoubleBuffer.SharedAB",
         "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
         "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+    }:
+        return PHASE1_CORE_COUPLED
+    if strategy_id in {
         "Pipeline.WarpRegisterPrefetchAB",
         "Pipeline.SoftwarePrefetch.RegisterA",
     }:
@@ -2279,8 +2836,6 @@ def merge_terminal_verifications(
         summaries.append(terminal.get("summary", {}))
 
     best_candidate = choose_best_candidate([item for item in merged_candidates if item.get("accepted")])
-    if best_candidate is None:
-        best_candidate = choose_best_candidate(merged_candidates)
     best_state = merged_frontier_by_chain_id.get((best_candidate or {}).get("strategy_id"))
     top_terminal_results = build_top_terminal_results(merged_candidates, DEFAULT_TOP_K_FINAL_RESULTS)
     terminal_chain_count = sum(summary.get("terminal_chain_count", 0) for summary in summaries)
@@ -2519,7 +3074,6 @@ def run_stage(
     lazy_fallback_execution: bool = DEFAULT_LAZY_FALLBACK_EXECUTION,
 ) -> dict[str, Any]:
     compile_each_step = False
-    compile_each_stage = False
     stage_snapshot = base_source_snapshot or snapshot_source_files(backend_code_root(current_ir), backend_code_files(current_ir))
     controller = StageController(
         strategy_index=raw_strategy_index,
@@ -2533,9 +3087,26 @@ def run_stage(
     if current_subphase_id and current_subphase_id.endswith(".StageVerification"):
         stage_report = controller.verify_stage(current_ir, include_code_checks=False)
         stage_report["verification_scope"] = "stage_ir_predicates_only"
-        stage_report["runtime_verification"] = "deferred_until_phase1_completion"
         verified_stage_ir = current_ir
         verified_stage_snapshot = stage_snapshot
+        if stage_report["accepted"] and compile_each_stage:
+            verified_stage_ir = verify_stage_completion_build_run(
+                ir=current_ir,
+                source_snapshot=stage_snapshot,
+                stage=stage,
+                chain_path=parent_path or [],
+                chain_code=parent_path_code or [],
+                build_platform=build_platform,
+                timeout_seconds=step_compile_timeout_seconds,
+                benchmark_runs=stage_benchmark_runs,
+                benchmark_warmup_runs=stage_benchmark_warmup_runs,
+            )
+            stage_report = attach_stage_compile_run_report(stage_report, verified_stage_ir)
+            stage_report["runtime_verification"] = "completed_at_stage_boundary"
+            stage_report["stage_compile_run"]["gate"] = "advisory_until_phase1_completion"
+            stage_report["accepted"] = True
+        else:
+            stage_report["runtime_verification"] = "deferred_until_phase1_completion"
         save_json(stage_path(DEFAULT_PRECHECK_OUTPUT, current_subphase_id), stage_report)
         save_json(stage_path(DEFAULT_POSTCHECK_OUTPUT, current_subphase_id), stage_level_post_check(stage, current_subphase_id, stage_report))
         return {
@@ -3056,6 +3627,18 @@ def run_exhaustive_stage(
                 completed_history["events"].extend(stage_result.get("events", []))
                 completed_history.setdefault("completed_stages", []).append(stage)
                 merge_strategy_progress_from_ir(completed_history, stage_result["stage_completed_ir"])
+                completed_history.setdefault("stage_checkpoints", []).append(
+                    {
+                        "stage": stage,
+                        "path": list(state.get("path", [])),
+                        "path_code": chain_code_key(state.get("path_code", [])),
+                        "compile_run": (
+                            stage_result.get("summary", {}).get("stage_verification", {}).get("stage_compile_run")
+                            or {"enabled": False, "status": "deferred"}
+                        ),
+                        "source_snapshot_available": bool(stage_result.get("stage_source_snapshot")),
+                    }
+                )
                 completed_path_key = tuple(state.get("path", []))
                 if completed_path_key not in output_paths:
                     output_paths.add(completed_path_key)
@@ -3180,10 +3763,10 @@ def run_exhaustive_stage(
             "stage_candidate_count": stage_candidate_count,
             "stage_pruned_paths": [
                 {"path_code": chain_code_key(state.get("path_code", [])),
-                 "reason": "global_stage_top_k"}
+                 "reason": "stage_budget_after_block_diversity"}
                 for state in stage_pruned
             ],
-            "stage_selection_basis": "selection_rank_then_resource_estimate_not_measured_performance",
+            "stage_selection_basis": "best_quality_then_distinct_blocks_then_mmr",
             "accepted_candidate_count": len(accepted_candidates),
             "best_stage_strategy_id": choose_best_candidate(accepted_candidates)["strategy_id"]
             if accepted_candidates
@@ -3556,12 +4139,14 @@ def load_strategy_scoped_code_context(
 ) -> dict[str, Any]:
     if target_backend(ir) == "cpu":
         return load_code_context(code_dir, code_files)
-    return load_code_region_context(
-        code_dir,
-        code_files,
-        regions=strategy_relevant_regions(strategy, patch_result),
-        context_radius=8,
-    )
+    context = load_code_context(code_dir, [name for name in code_files if name != "main.cpp"])
+    context["context_scope"] = "complete_current_parent_kernel"
+    context["suggested_regions"] = strategy_relevant_regions(strategy, patch_result)
+    context["region_selection"] = "Choose all coupled existing regions needed; suggestions are not restrictions."
+    from SGPO.verification.locked_repair import cooperative_load_reference
+    context["cooperative_load_reference"] = cooperative_load_reference(
+        context.get("files", {}).get("cuda_kernel.cuh", ""), ir)
+    return context
 
 
 def strategy_relevant_regions(
@@ -3722,7 +4307,11 @@ def apply_deterministic_code_patch(
     if not kernel_path.exists():
         raise FileNotFoundError(f"deterministic materializer requires cuda_kernel.cuh: {kernel_path}")
 
-    original = kernel_path.read_text(encoding="utf-8")
+    disk_original = kernel_path.read_text(encoding="utf-8")
+    original = disk_original
+    if "SGPO_NAIVE_BASELINE" in disk_original:
+        scaffold = ROOT / "gemm_code" / "skeleton_template" / "cuda_kernel.cuh"
+        original = scaffold.read_text(encoding="utf-8")
     content = original
     applied = []
     if strategy_id == "Reordering.LoadCompute.SeparatePhases":
@@ -3731,7 +4320,7 @@ def apply_deterministic_code_patch(
         content = replace_anchor_region(content, region, replacement)
         applied.append({"file": "cuda_kernel.cuh", "region": region, "change_summary": f"Replaced {region} region."})
 
-    if content != original:
+    if content != disk_original:
         kernel_path.write_text(content, encoding="utf-8")
 
     generated_code = {
@@ -4057,6 +4646,17 @@ def run_strategy_candidate(
         restore_source_files(candidate_code_dir, base_source_snapshot)
         code_files = backend_code_files(base_ir)
         context_files = backend_llm_context_files(base_ir)
+        if target_backend(base_ir) != "cpu":
+            # Code-region ownership may expand; IR/strategy ownership remains locked.
+            strategy = copy.deepcopy(strategy)
+            contract = dict(strategy.get("patch_contract") or {})
+            strategy["patch_contract"] = contract
+            current_source = base_source_snapshot.get("cuda_kernel.cuh", "")
+            contract["allowed_regions"] = [name for name in CUDA_REPAIR_REGIONS
+                if f"{name}_BEGIN" in current_source and f"{name}_END" in current_source]
+            contract["preserved_regions"] = []
+            contract["region_edits_only"] = True
+            contract["preserve_existing_strategy_semantics"] = True
         try:
             patch_code_context = load_strategy_scoped_code_context(
                 base_ir,
@@ -4306,6 +4906,9 @@ def run_strategy_candidate(
 
 def non_repairable_llm_generation_error(error: Exception) -> bool:
     error_type = type(error).__name__
+    from SGPO.generate_ir.unlock_feedback import INFRASTRUCTURE_ERRORS
+    if error_type in INFRASTRUCTURE_ERRORS:
+        return True
     error_message = str(error).lower()
     if error_type in {
         "APIConnectionError",
@@ -4381,6 +4984,18 @@ def check_patch_anchor_pairs(relative_path: str, content: str) -> list[dict[str,
     for name in begin_pattern.findall(content):
         begin_counts[name] = begin_counts.get(name, 0) + 1
     for name in end_pattern.findall(content):
+        end_counts[name] = end_counts.get(name, 0) + 1
+    generic_begin = re.compile(
+        r"\b(LAUNCH_CONFIG|SHARED_DECL|INDEX_MAPPING|REGISTER_DECL|GLOBAL_TO_SHARED_LOAD|"
+        r"NEXT_TILE_LOAD|SYNC_AFTER_LOAD|MAIN_LOOP|COMPUTE_INNER|STORE)_BEGIN\b"
+    )
+    generic_end = re.compile(
+        r"\b(LAUNCH_CONFIG|SHARED_DECL|INDEX_MAPPING|REGISTER_DECL|GLOBAL_TO_SHARED_LOAD|"
+        r"NEXT_TILE_LOAD|SYNC_AFTER_LOAD|MAIN_LOOP|COMPUTE_INNER|STORE)_END\b"
+    )
+    for name in generic_begin.findall(content):
+        begin_counts[name] = begin_counts.get(name, 0) + 1
+    for name in generic_end.findall(content):
         end_counts[name] = end_counts.get(name, 0) + 1
     names = sorted(set(begin_counts) | set(end_counts))
     return [
@@ -5240,7 +5855,9 @@ def candidate_gflops(candidate: dict[str, Any] | None) -> float | None:
     if not candidate:
         return None
     performance = candidate.get("verified_ir", {}).get("performance", {}) or {}
-    value = performance.get("gflops_mean")
+    value = performance.get("gflops_trimmed_mean")
+    if value is None:
+        value = performance.get("gflops_mean")
     if value is None:
         value = performance.get("gflops_median")
     if value is None:
@@ -5271,52 +5888,224 @@ def candidate_event(
 
 
 def repair_chain_locally(source_chain_dir, output_chain_dir, diagnosis=None, ir=None,
-                         client=None, strategy_library=None):
-    """Repair production CUDA code through region edits, never a template rewrite."""
+                         client=None, strategy_library=None, repair_attempt=1,
+                         baseline_snapshot=None):
+    """Repair the current failed CUDA source without reselecting strategies."""
     if target_backend(ir or {}) == "cpu":
         return generate_semantic_repair_candidate(source_chain_dir, output_chain_dir, diagnosis, ir)
-    if client is None:
-        return {"status": "repair_unavailable", "reason": "local repair requires an LLM client"}
     strategy_ids = (ir or {}).get("strategy", {}).get("applied_strategy_ids", [])
     strategies = []
     for strategy_id in strategy_ids:
         try:
-            strategies.append(load_strategy(strategy_library or {}, strategy_id))
+            loaded = load_strategy(strategy_library or {}, strategy_id)
+            strategies.append(
+                {
+                    "strategy_id": strategy_id,
+                    "modifies_regions": loaded.get("modifies_regions", []),
+                    "provides_fields": loaded.get("provides_fields", []),
+                    "implementation_example_ids": loaded.get("implementation_example_ids", []),
+                    "preconditions": loaded.get("preconditions", {}),
+                    "postconditions": loaded.get("postconditions", {}),
+                    "ir_updates": loaded.get("ir_updates", {}),
+                }
+            )
         except ValueError:
-            continue
+            strategies.append({"strategy_id": strategy_id})
+    kernel_path = Path(source_chain_dir) / "cuda_kernel.cuh"
+    kernel_content = kernel_path.read_text(encoding="utf-8")
+    repair_level = min(max(int(repair_attempt), 1), 3)
+    full_kernel_repair = repair_level >= 3
+    suggested_regions = repair_regions_from_diagnosis(kernel_content, diagnosis or {}, repair_level)
+    allowed_regions = [name for name in CUDA_REPAIR_REGIONS
+                       if f"{name}_BEGIN" in kernel_content and f"{name}_END" in kernel_content]
+    from SGPO.verification.locked_repair import locked_tile_parameters, tile_lock_defects, repair_evidence
+    locked_parameters = locked_tile_parameters(ir or {}, kernel_content)
+    symbol_contract = extract_cuda_symbol_contract(kernel_content)
     strategy = {
         "strategy_id": "Repair.PreserveAppliedStrategies",
         "applied_strategies": strategies,
+        "locked_strategy_ids": list(strategy_ids),
+        "locked_tile_parameters": locked_parameters,
         "patch_contract": {
-            "region_edits_only": True,
-            "allowed_regions": ["LAUNCH_CONFIG", "SHARED_DECL", "INDEX_MAPPING", "REGISTER_DECL",
-                                "GLOBAL_TO_SHARED_LOAD", "NEXT_TILE_LOAD", "SYNC_AFTER_LOAD", "MAIN_LOOP", "COMPUTE_INNER", "STORE"],
+            "region_edits_only": not full_kernel_repair,
+            "allowed_regions": allowed_regions,
             "preserved_regions": [],
         },
     }
     patch = {"strategy_id": strategy["strategy_id"], "code_patch": [],
-             "repair_instruction": "Fix the diagnosed defects using local region edits. Preserve all existing optimizations, tile parameters, layout, vectorization and pipeline. Never substitute a generic GEMM template."}
-    originals = snapshot_source_files(source_chain_dir, backend_code_files(ir or {}))
+             "repair_instruction": "Repair implementation only: compile, correctness and runtime safety must pass and ALL locked strategies must be implemented. Never reselect strategies or change locked parameters or IR. Report concrete constraint omissions separately; failed repair does not establish a strategy conflict."}
+    originals = dict(snapshot_source_files(source_chain_dir, backend_code_files(ir or {})))
+    evidence = repair_evidence(ir or {}, diagnosis or {}, kernel_content,
+                              (baseline_snapshot or originals).get("cuda_kernel.cuh", kernel_content))
     try:
+        deterministic = apply_deterministic_compile_repairs(kernel_content, diagnosis or {})
+        from SGPO.verification.targeted_cuda_repair import repair_known_cuda_defects
+        from SGPO.verification.optimization_preservation import preservation_defects
+        deterministic, targeted_changes = repair_known_cuda_defects(deterministic, ir or {})
+        if deterministic != kernel_content and (not full_kernel_repair or client is None):
+            violations = tile_lock_defects(deterministic, locked_parameters) + preservation_defects(
+                kernel_content, deterministic, strategy)
+            if violations:
+                raise ValueError("; ".join(violations))
+            restore_source_files(output_chain_dir, originals)
+            (Path(output_chain_dir) / "cuda_kernel.cuh").write_text(deterministic, encoding="utf-8")
+            syntax = check_generated_source_syntax(output_chain_dir, backend_ast_files(ir or {}))
+            if syntax.get("accepted") is False:
+                raise ValueError("Deterministic repair introduced source syntax defects")
+            return {
+                "status": "repair_generated",
+                "method": "deterministic_compile_repair",
+                "targeted_changes": targeted_changes,
+                "repair_level": repair_level,
+                "allowed_regions": allowed_regions,
+                "locked_strategy_ids": list(strategy_ids),
+                "locked_tile_parameters": locked_parameters,
+                "source_hash_after": source_snapshot_hash(
+                    snapshot_source_files(Path(output_chain_dir), backend_code_files(ir or {}))
+                ),
+            }
+        if client is None:
+            return {"status": "repair_unavailable", "reason": "no matching deterministic repair; LLM client required"}
         generated = generate_code_files_from_patch_with_llm(
             client=client, patch_ir=ir or {}, patch_result=patch, strategy=strategy,
-            code_context=load_code_region_context(source_chain_dir, ["cuda_kernel.cuh", "kernel.h"]),
-            repair_context={"defect_diagnosis": diagnosis or {}, "requires_more_regions": True,
-                            "repair_instruction": patch["repair_instruction"]},
+            code_context=load_code_context(source_chain_dir, ["cuda_kernel.cuh", "kernel.h"]),
+            prompt_path=ROOT / "llm" / "prompts" / (
+                "repair_locked_cuda_full_prompt.txt" if full_kernel_repair
+                else "repair_locked_cuda_prompt.txt"),
+            repair_context={**evidence, "requires_more_regions": True,
+                            "repair_instruction": patch["repair_instruction"],
+                            "repair_level": repair_level,
+                            "suggested_regions": suggested_regions,
+                            "allowed_regions": allowed_regions,
+                            "symbol_contract": symbol_contract},
         )
-        if not generated.get("edits"):
+        if full_kernel_repair:
+            files = generated.get("files", [])
+            if generated.get("edits") or len(files) != 1 or files[0].get("path") != "cuda_kernel.cuh":
+                raise ValueError("Full repair must return only cuda_kernel.cuh")
+        elif not generated.get("edits"):
             raise ValueError("Production repair must return local region edits")
+        if any(edit.get("path") != "cuda_kernel.cuh" for edit in generated.get("edits", [])):
+            raise ValueError("Repair cannot modify files other than cuda_kernel.cuh")
+        if any(key in generated for key in ("ir_updates", "selected_strategy_ids", "applied_strategy_ids")):
+            raise ValueError("Repair must not update IR or reselect strategies")
         restore_source_files(output_chain_dir, originals)
         applied = apply_generated_code_files(generated, output_chain_dir, ir or {}, strategy)
         if applied.get("status") != "pass":
             raise ValueError(applied.get("error_message", "local repair application failed"))
+        violations = tile_lock_defects((Path(output_chain_dir) / "cuda_kernel.cuh").read_text(encoding="utf-8"), locked_parameters)
+        if violations:
+            raise ValueError("; ".join(violations))
         syntax = check_generated_source_syntax(output_chain_dir, backend_ast_files(ir or {}))
         if syntax.get("accepted") is False:
             raise ValueError("Repair introduced source syntax defects: " + json.dumps(syntax["results"]))
-        return {"status": "repair_generated", "method": "llm_region_patch", "patch": generated}
+        after_snapshot = snapshot_source_files(Path(output_chain_dir), backend_code_files(ir or {}))
+        after_hash = source_snapshot_hash(after_snapshot)
+        if after_hash == source_snapshot_hash(originals):
+            raise ValueError("Repair produced no source change")
+        return {
+            "status": "repair_generated",
+            "method": "llm_full_kernel" if full_kernel_repair else "llm_coupled_region_patch",
+            "repair_level": repair_level,
+            "allowed_regions": allowed_regions,
+            "symbol_contract": symbol_contract,
+            "locked_strategy_ids": list(strategy_ids),
+            "locked_tile_parameters": locked_parameters,
+            "localization": evidence,
+            "source_hash_after": after_hash,
+            "patch": generated,
+        }
     except Exception as exc:
         restore_source_files(output_chain_dir, originals)
-        return {"status": "repair_failed", "error_message": str(exc)}
+        return {"status": "repair_failed", "error_message": str(exc),
+                "failure_class": "implementation_repair_failed_not_strategy_conflict",
+                "rejected_patch": locals().get("generated"),
+                "locked_strategy_ids": list(strategy_ids), "locked_tile_parameters": locked_parameters,
+                "localization": evidence}
+
+
+CUDA_REPAIR_REGIONS = [
+    "LAUNCH_CONFIG", "SHARED_DECL", "INDEX_MAPPING", "REGISTER_DECL",
+    "GLOBAL_TO_SHARED_LOAD", "NEXT_TILE_LOAD", "SYNC_AFTER_LOAD",
+    "MAIN_LOOP", "COMPUTE_INNER", "STORE",
+]
+
+
+def source_snapshot_hash(snapshot: dict[str, str]) -> str:
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def repair_regions_from_diagnosis(source: str, diagnosis: dict[str, Any], repair_level: int) -> list[str]:
+    line_regions = anchor_regions_for_compiler_lines(source, compiler_error_lines(diagnosis))
+    text = json.dumps(diagnosis, ensure_ascii=False).lower()
+    inferred: list[str] = []
+    if any(token in text for token in ["undeclared", "undefined", "identifier", "rega", "regb"]):
+        inferred.extend(["REGISTER_DECL", "COMPUTE_INNER"])
+    if any(token in text for token in ["sa\"", "sb\"", "shared", "cooperative load"]):
+        inferred.extend(["SHARED_DECL", "GLOBAL_TO_SHARED_LOAD", "NEXT_TILE_LOAD"])
+    if any(token in text for token in ["launch", "<<<", "blockdim", "griddim"]):
+        inferred.append("LAUNCH_CONFIG")
+    if any(token in text for token in ["store", "output", "epilogue"]):
+        inferred.append("STORE")
+    ordered = unique_region_names([*line_regions, *inferred])
+    limits = {1: 2, 2: 4, 3: len(CUDA_REPAIR_REGIONS)}
+    return ordered[:limits.get(repair_level, 4)]
+
+
+def compiler_error_lines(diagnosis: dict[str, Any]) -> list[int]:
+    text = json.dumps(diagnosis, ensure_ascii=False)
+    values = re.findall(r"cuda_kernel\.cuh(?:\(|:)(\d+)(?:\)|:)", text, flags=re.IGNORECASE)
+    return sorted({int(value) for value in values})
+
+
+def anchor_regions_for_compiler_lines(source: str, line_numbers: list[int]) -> list[str]:
+    lines = source.splitlines()
+    spans: list[tuple[str, int, int]] = []
+    for region in CUDA_REPAIR_REGIONS:
+        begin = next((index for index, line in enumerate(lines, start=1) if f"{region}_BEGIN" in line), None)
+        end = next((index for index, line in enumerate(lines, start=1)
+                    if begin is not None and index > begin and f"{region}_END" in line), None)
+        if begin is not None and end is not None:
+            spans.append((region, begin, end))
+    result: list[str] = []
+    for line_number in line_numbers:
+        containing = [(region, end - begin) for region, begin, end in spans if begin <= line_number <= end]
+        if containing:
+            region = min(containing, key=lambda item: item[1])[0]
+            if region not in result:
+                result.append(region)
+    return result
+
+
+def extract_cuda_symbol_contract(source: str) -> dict[str, Any]:
+    code = strip_comments_for_light_syntax(source)
+    declarations = sorted(set(re.findall(
+        r"\b(?:const\s+)?(?:unsigned\s+)?(?:int|float|double|float[234]|dim3)\s+([A-Za-z_]\w*)",
+        code,
+    )))
+    arrays = sorted(set(re.findall(
+        r"\b(?:__shared__\s+)?(?:float|double|float[234])\s+([A-Za-z_]\w*)\s*(?=\[)",
+        code,
+    )))
+    return {
+        "declared_identifiers": declarations[:120],
+        "array_identifiers": arrays[:60],
+        "rule": "Reuse declared symbols with compatible scope and dimensions; do not invent aliases.",
+    }
+
+
+def apply_deterministic_compile_repairs(source: str, diagnosis: dict[str, Any]) -> str:
+    text = json.dumps(diagnosis, ensure_ascii=False).lower()
+    if "expected a" not in text and "compile" not in text:
+        return source
+    # CUDA launch syntax cannot contain a function qualifier between the
+    # template-id and <<<...>>> launch configuration.
+    return re.sub(
+        r"(\bgemm\s*<[^;{}]+?>\s*)\b__forceinline(?:__)?\s*(?=<<<)",
+        r"\1",
+        source,
+        flags=re.DOTALL,
+    )
 
 
 def deduplicate_code_candidates(candidates):
@@ -5393,10 +6182,16 @@ def verify_terminal_chains(
             benchmark_warmup_runs=benchmark_warmup_runs,
         )
         repair_attempts = []
+        repair_baseline_snapshot = snapshot_source_files(chain_dir, backend_code_files(terminal_ir))
+        seen_repair_hashes: set[str] = set()
         for repair_attempt in range(1, DEFAULT_MAX_REPAIR_ATTEMPTS + 1):
             if terminal_chain_is_accepted(verified_ir):
                 break
             diagnosis = verified_ir.get("defect_diagnosis", {})
+            before_repair_ir = copy.deepcopy(verified_ir)
+            before_repair_source = snapshot_source_files(chain_dir, backend_code_files(verified_ir))
+            save_json(chain_dir / f"repair_checkpoint_{repair_attempt}.json",
+                      {"ir": before_repair_ir, "source_snapshot": before_repair_source})
             repair_result = repair_chain_locally(
                 source_chain_dir=chain_dir,
                 output_chain_dir=chain_dir,
@@ -5404,10 +6199,31 @@ def verify_terminal_chains(
                 ir=verified_ir,
                 client=client,
                 strategy_library=strategy_library,
+                repair_attempt=repair_attempt,
+                baseline_snapshot=repair_baseline_snapshot,
             )
             repair_result["repair_attempt"] = repair_attempt
             save_json(chain_dir / f"semantic_repair_attempt_{repair_attempt}.json", repair_result)
             repair_attempts.append(repair_result)
+            repair_hash = repair_result.get("source_hash_after")
+            if repair_result.get("status") != "repair_generated" or not repair_hash:
+                verified_ir["repair_feedback"] = repair_result
+                if repair_result.get("status") == "repair_failed":
+                    continue
+                break
+            if repair_hash in seen_repair_hashes:
+                repair_result["status"] = "repair_retry_no_progress"
+                repair_result["reason"] = "repair produced a previously tested source snapshot"
+                restore_source_files(chain_dir, before_repair_source)
+                verified_ir = before_repair_ir
+                verified_ir["repair_feedback"] = repair_result
+                save_json(chain_dir / f"semantic_repair_attempt_{repair_attempt}.json", repair_result)
+                continue
+            seen_repair_hashes.add(repair_hash)
+            verified_ir["locked_repair_contract"] = {
+                "strategy_ids": repair_result.get("locked_strategy_ids", []),
+                "tile_parameters": repair_result.get("locked_tile_parameters", {}),
+            }
             verified_ir = verify_terminal_chain_once(
                 terminal_ir=verified_ir,
                 chain_dir=chain_dir,
@@ -5418,6 +6234,14 @@ def verify_terminal_chains(
                 benchmark_runs=benchmark_runs,
                 benchmark_warmup_runs=benchmark_warmup_runs,
             )
+            from SGPO.verification.repair_transaction import finish_repair
+            verified_ir, rollback = finish_repair(
+                before_repair_ir, verified_ir, before_repair_source,
+                snapshot_source_files(chain_dir, backend_code_files(verified_ir)),
+                repair_result, terminal_chain_is_accepted(verified_ir))
+            if rollback:
+                restore_source_files(chain_dir, before_repair_source)
+            save_json(chain_dir / f"semantic_repair_attempt_{repair_attempt}.json", repair_result)
         if repair_attempts:
             verified_ir.setdefault("terminal_repair", {})["attempts"] = repair_attempts
             verified_ir.setdefault("terminal_repair", {})["attempt_count"] = len(repair_attempts)
@@ -5475,10 +6299,8 @@ def verify_terminal_chains(
 
 
 def build_top_terminal_results(candidates: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
-    runnable_correct = [candidate for candidate in candidates if candidate_has_correctness_pass(candidate)
-                        and candidate.get("verified_ir", {}).get("verification", {}).get("summary", {}).get("optimization_realization_status") != "fail"]
     accepted = [candidate for candidate in candidates if candidate.get("accepted")]
-    ranked_pool = deduplicate_code_candidates(runnable_correct or accepted)
+    ranked_pool = deduplicate_code_candidates(accepted)
     ranked = sorted(ranked_pool, key=lambda item: candidate_gflops(item) or -1.0, reverse=True)[:top_k]
     results = []
     for rank, candidate in enumerate(ranked, start=1):
@@ -5502,25 +6324,33 @@ def build_top_terminal_results(candidates: list[dict[str, Any]], top_k: int) -> 
                 "acceptance_basis": verification_summary.get("acceptance_basis"),
                 "code_verification_basis": verification_summary.get("code_verification_basis"),
                 "optimization_realization_status": verification_summary.get("optimization_realization_status"),
+                "strategy_application": verified_ir.get("strategy_application"),
                 "code_verification_status": verification_summary.get("code_verification_status"),
                 "checker_failure_is_terminal": verification_summary.get("checker_failure_is_terminal"),
                 "code_checker_advisory_failure": verification_summary.get("code_checker_advisory_failure"),
+                "static_findings_are_advisory": verification_summary.get("static_findings_are_advisory"),
+                "locked_repair_status": verified_ir.get("locked_repair_verification", {}).get("status"),
+                "hard_constraints_ok": verified_ir.get("phase1_hard_constraints", {}).get("hard_constraints_ok"),
                 "latency_ms": performance.get("latency_ms") or verification_summary.get("latency_ms"),
                 "gflops": performance.get("gflops") or verification_summary.get("gflops"),
                 "benchmark_runs": performance.get("benchmark_runs"),
                 "benchmark_warmup_runs": performance.get("warmup_runs"),
                 "benchmark_successful_runs": performance.get("benchmark_successful_runs"),
                 "latency_ms_mean": performance.get("latency_ms_mean"),
+                "latency_ms_trimmed_mean": performance.get("latency_ms_trimmed_mean"),
                 "latency_ms_median": performance.get("latency_ms_median"),
                 "latency_ms_std": performance.get("latency_ms_std"),
                 "latency_ms_best": performance.get("latency_ms_best"),
                 "gflops_mean": performance.get("gflops_mean"),
+                "gflops_trimmed_mean": performance.get("gflops_trimmed_mean"),
                 "gflops_median": performance.get("gflops_median"),
                 "gflops_std": performance.get("gflops_std"),
                 "gflops_best": performance.get("gflops_best"),
                 "relative_to_cublas": performance.get("relative_to_cublas"),
                 "cublas_latency_ms_mean": performance.get("cublas_latency_ms_mean"),
+                "cublas_latency_ms_trimmed_mean": performance.get("cublas_latency_ms_trimmed_mean"),
                 "cublas_gflops_mean": performance.get("cublas_gflops_mean"),
+                "cublas_gflops_trimmed_mean": performance.get("cublas_gflops_trimmed_mean"),
                 "cpu_blas_latency_ms": performance.get("cpu_blas_latency_ms"),
                 "cpu_blas_gflops": performance.get("cpu_blas_gflops"),
                 "relative_to_cpu_blas": performance.get("relative_to_cpu_blas"),
@@ -5553,17 +6383,31 @@ def verify_terminal_chain_once(
 ) -> dict[str, Any]:
     current_ir = copy.deepcopy(terminal_ir)
     if target_backend(current_ir) != "cpu":
+        from SGPO.verification.store_alignment_proof import prove_fragment_store_alignment
+        kernel_path, harness_path = chain_dir / "cuda_kernel.cuh", chain_dir / "main.cpp"
+        if kernel_path.exists() and harness_path.exists():
+            from SGPO.verification.pipeline_evidence import pipeline_evidence
+            current_ir['pipeline_realization'] = pipeline_evidence(kernel_path.read_text(encoding='utf-8'))
+            save_json(chain_dir / 'pipeline_realization.json', current_ir['pipeline_realization'])
+            proof = prove_fragment_store_alignment(kernel_path.read_text(encoding="utf-8"),
+                                                    harness_path.read_text(encoding="utf-8"), current_ir)
+            old_node = current_ir.get("vectorization", {}).get("C", {})
+            if old_node.get("alignment_evidence", {}).get("scope") == "current_shape_and_cudaMalloc_benchmark":
+                old_node["alignment_proven"] = False
+                old_node.pop("alignment_evidence", None)
+            if proof:
+                node = current_ir.setdefault("vectorization", {}).setdefault("C", {})
+                node["alignment_proven"] = True
+                node["alignment_evidence"] = proof
+    if target_backend(current_ir) != "cpu":
         from SGPO.verification.memory_access_plan import enforce_memory_access_plan
-        access_plan = enforce_memory_access_plan(chain_dir)
+        access_plan = enforce_memory_access_plan(chain_dir, allow_scalar_fallback=False)
         current_ir["memory_access_plan_verification"] = access_plan
+        from SGPO.verification.cooperative_load_repair import diagnose_cooperative_loads
+        current_ir["cooperative_load_diagnostics"] = diagnose_cooperative_loads(
+            (chain_dir / "cuda_kernel.cuh").read_text(encoding="utf-8"), current_ir)
+        save_json(chain_dir / "cooperative_load_diagnostics.json", current_ir["cooperative_load_diagnostics"])
         save_json(chain_dir / "memory_access_plan_verification.json", access_plan)
-        if access_plan.get("materialized"):
-            current_ir.setdefault("memory", {})["access_plan"] = {
-                "mode": "deterministic_safe_scalar_fallback",
-                "shared_A_layout": "k_m",
-                "shared_B_layout": "k_n",
-                "tail_policy": "zero_fill",
-            }
     if target_backend(current_ir) != "cpu":
         current_ir["phase1_hard_constraints"] = check_after_codegen(
             current_ir, include_hard_constraints=True,
@@ -5608,10 +6452,52 @@ def verify_terminal_chain_once(
     summary["code_verification_basis"] = "advisory_after_oracle"
     summary["checker_failure_is_terminal"] = not oracle_passed
     summary["code_checker_advisory_failure"] = oracle_passed and not code_checker_passed
-    realization_failures = [defect for defect in diagnose_defects(verified_ir).get("defects", [])
-                            if defect.get("defect_type") == "Pipeline.AsyncCopyProtocolMissing"]
-    summary["optimization_realization_status"] = "fail" if realization_failures else "not_disproven"
+    applied_strategy_ids = list((verified_ir.get("strategy", {}) or {}).get("applied_strategy_ids", []) or [])
+    applied_strategy_ids = append_unique(
+        applied_strategy_ids,
+        verified_ir.get('strategy_contract_state', {}).get('selected_strategies', []))
+    realization = verify_strategy_realization(chain_dir, applied_strategy_ids, verified_ir)
+    verified_ir["strategy_realization"] = realization
+    from SGPO.verification.strategy_application import update_strategy_contract_state
+    update_strategy_contract_state(verified_ir)
+    if target_backend(verified_ir) != "cpu" and "locked_repair_contract" in verified_ir:
+        from SGPO.verification.locked_repair import tile_lock_defects
+        locked = verified_ir["locked_repair_contract"]
+        lock_errors = tile_lock_defects((chain_dir / "cuda_kernel.cuh").read_text(encoding="utf-8"), locked["tile_parameters"])
+        if verified_ir.get('strategy', {}).get('applied_strategy_ids', []) != locked["strategy_ids"]:
+            lock_errors.append("Applied strategy list changed during repair")
+        if not realization["hard_gate_passed"]:
+            lock_errors.append("Selected strategy implementation is missing")
+        if not code_checker_passed and not oracle_passed:
+            lock_errors.append("Selected strategy code verification did not pass")
+        verified_ir["locked_repair_verification"] = {
+            "status": "fail" if lock_errors else "pass", "errors": lock_errors,
+            "basis": "parameter_lock_and_available_strategy_verifiers",
+            "strategy_reports": realization.get("strategy_reports", []),
+            "code_checker_advisory_failure": oracle_passed and not code_checker_passed,
+        }
+    summary["optimization_realization_status"] = (
+        "fail" if not realization["hard_gate_passed"] else realization["realization_status"]
+    )
+    summary['static_findings_are_advisory'] = True
+    summary['acceptance_basis'] = 'compile_correctness_runtime_oracle'
+    summary['checker_failure_is_terminal'] = not oracle_passed
+    summary['code_checker_advisory_failure'] = oracle_passed and (
+        not code_checker_passed or not realization['hard_gate_passed']
+        or verified_ir.get('locked_repair_verification', {}).get('status') == 'fail'
+        or verified_ir.get('phase1_hard_constraints', {}).get('hard_constraints_ok') is False
+    )
     diagnosis = diagnose_defects(verified_ir, verified_ir.get("phase1_hard_constraints"))
+    lock_report = verified_ir.get("locked_repair_verification", {})
+    if lock_report.get("status") == "fail":
+        diagnosis.setdefault("defects", []).append({
+            "defect_type": "StrategyCompliance.LockedRepairContractViolation",
+            "related_strategy": "Repair.PreserveAppliedStrategies",
+            "related_fields": ["strategy.applied_strategy_ids", "tiling"],
+            "repair_action": "Implement the locked strategies and parameters without reselection; consult strategy reports and code verification.",
+            "evidence": lock_report,
+        })
+        diagnosis["defect_count"] = len(diagnosis["defects"])
     diagnosis["stage"] = "Chain"
     diagnosis["chain_id"] = chain_id
     diagnosis["terminal_verification_attempt"] = attempt
@@ -5667,6 +6553,19 @@ def check_terminal_code_completeness(chain_dir: Path, ir: dict[str, Any]) -> dic
     content = kernel_path.read_text(encoding="utf-8")
     code_only = strip_cpp_comments(content)
     checks = []
+    access_plan = ir.get("memory_access_plan_verification", {}) or {}
+    checks.append({
+        "id": "MEMORY_ACCESS_PLAN_VERIFIED",
+        "status": "pass" if access_plan.get("status") == "pass" and access_plan.get("checked") else "fail",
+        "message": access_plan.get("reason") or (
+            "generated CUDA memory accesses passed deterministic source checks"
+            if access_plan.get("status") == "pass"
+            else "generated CUDA memory access plan could not be verified"
+        ),
+        "failure_type": "GEMM.Semantic.MemoryAccessContractViolation",
+        "repair_action": "repair block offsets, shared-memory rank, register extents, K-tile coverage and accumulator layout",
+        "detail": {"defects": access_plan.get("defects", [])},
+    })
     checks.append({
         "id": "NO_PLACEHOLDER_ONLY_REGIONS",
         "status": "pass" if "Insert " not in code_only else "fail",
@@ -5698,6 +6597,8 @@ def check_terminal_code_completeness(chain_dir: Path, ir: dict[str, Any]) -> dic
         shared_names = []
         for file_ast in (ir.get("code_ast", {}).get("files", {}) or {}).values():
             shared_names.extend((item.get("name") for item in file_ast.get("shared_memory", []) or []))
+        from SGPO.verification.optimization_preservation import staged_buffers
+        shared_names.extend(staged_buffers(code_only))
         checks.append({
             "id": "HAS_SHARED_A_B",
             "status": "pass" if has_name_like(shared_names, ["As", "shared_A", "sA"]) and has_name_like(shared_names, ["Bs", "shared_B", "sB"]) else "fail",
@@ -5916,9 +6817,9 @@ def has_name_like(names: list[Any], candidates: list[str]) -> bool:
 
 
 def terminal_chain_is_accepted(verified_ir: dict[str, Any]) -> bool:
-    return (oracle_verification_passed(verified_ir)
-            and verified_ir.get("phase1_hard_constraints", {}).get("hard_constraints_ok") is not False
-            and verified_ir.get("verification", {}).get("summary", {}).get("optimization_realization_status") != "fail")
+    # Preserve measured working kernels even when static proofs or selected
+    # strategy realization are incomplete. Keep those findings in the report.
+    return oracle_verification_passed(verified_ir)
 
 
 def chain_id_for_state(index: int, state: dict[str, Any]) -> str:
@@ -6024,6 +6925,9 @@ def copy_history(history: dict[str, Any]) -> dict[str, Any]:
         "completed_subphases": list(history.get("completed_subphases", []) or []),
         "optional_skipped_subphases": list(history.get("optional_skipped_subphases", []) or []),
         "stage_checkpoints": copy.deepcopy(history.get("stage_checkpoints", []) or []),
+        "failed_unlock_bundles": list(history.get("failed_unlock_bundles", []) or []),
+        "ineffective_unlock_bundles": list(history.get("ineffective_unlock_bundles", []) or []),
+        "recent_unlock_defect": copy.deepcopy(history.get("recent_unlock_defect")),
     }
 
 
@@ -6116,37 +7020,138 @@ def partial_candidate_score(candidate: dict[str, Any]) -> tuple[int, float]:
 
 
 def select_stage_survivors(states: list[dict[str, Any]], top_k: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Bound stage output independently of how pending candidates were explored."""
+    """Select a quality/diversity stage frontier with Pareto filtering and MMR."""
     if top_k <= 0 or len(states) <= top_k:
         return list(states), []
+    features = [_stage_state_features(state) for state in states]
+    measured = [item for item in features if item["performance"] is not None]
+    if measured:
+        best = max(item["performance"] for item in measured)
+        eligible = [
+            item for item in features
+            if item["performance"] is None
+            or item["performance"] >= best * STAGE_PERFORMANCE_FLOOR_RATIO
+        ]
+    else:
+        eligible = features
+    pareto = [
+        item for item in eligible
+        if not any(_dominates(other, item) for other in eligible if other is not item)
+    ]
+    quality_values = [item["quality"] for item in eligible]
+    quality_min = min(quality_values)
+    quality_span = max(quality_values) - quality_min
+    for item in eligible:
+        item["normalized_quality"] = (
+            (item["quality"] - quality_min) / quality_span if quality_span > 0 else 1.0
+        )
+    pool = pareto + [item for item in eligible if item not in pareto]
+    selected = []
+    while pool and len(selected) < top_k:
+        if not selected:
+            choice = max(pool, key=lambda item: (item["normalized_quality"], -item["mean_rank"]))
+        else:
+            # Reserve distinct Block regimes before spending the remaining
+            # construction budget on siblings of the same Block configuration.
+            represented = {item['signature'][:3] for item in selected}
+            distinct = [item for item in pool
+                        if all(value is not None for value in item['signature'][:3])
+                        and item['signature'][:3] not in represented]
+            choice = max(
+                distinct or pool,
+                key=lambda item: (
+                    STAGE_MMR_LAMBDA * item["normalized_quality"]
+                    + (1.0 - STAGE_MMR_LAMBDA)
+                    * min(_structure_distance(item["signature"], kept["signature"]) for kept in selected),
+                    -item["mean_rank"],
+                ),
+            )
+        selected.append(choice)
+        pool.remove(choice)
+    kept = [item["state"] for item in selected]
+    removed = [state for state in states if state not in kept]
+    for index, item in enumerate(selected):
+        item["state"]["survivor_role"] = "best_quality" if index == 0 else "diversity_preserved"
+        item["state"]["stage_selection_metrics"] = {
+            key: value for key, value in item.items() if key not in {"state", "signature"}
+        }
+    return kept, removed
 
-    has_architecture_scores = any(
-        ir_get(state.get("current_ir", {}), "resource.tiling_candidate.architecture_score") is not None
-        for state in states
+
+def _stage_state_features(state: dict[str, Any]) -> dict[str, Any]:
+    ir = state.get("current_ir", {}) or {}
+    performance = _float_or_none(ir_get(ir, "performance.gflops_trimmed_mean"))
+    if performance is None:
+        performance = _float_or_none(ir_get(ir, "performance.gflops_mean"))
+    if performance is None:
+        performance = _float_or_none(ir_get(ir, "performance.gflops"))
+    if performance is not None and performance <= 0:
+        performance = None
+    architecture = _float_or_none(ir_get(ir, "resource.tiling_candidate.architecture_score")) or 0.0
+    registers = _float_or_none(ir_get(ir, "resource.registers.estimated_per_thread"))
+    if registers is None:
+        registers = _float_or_none(ir_get(ir, "resource.estimated_registers_per_thread")) or 0.0
+    shared = _float_or_none(ir_get(ir, "resource.shared_memory.total_bytes")) or 0.0
+    opportunities = len(ir_get(ir, "strategy.future_compatible_strategy_ids", []) or [])
+    ranks = [int_or_default(value, 1) for value in state.get("path_code", [])]
+    mean_rank = sum(ranks) / len(ranks) if ranks else 1.0
+    quality = math.log1p(max(performance, 0.0)) if performance is not None else architecture / 20.0
+    quality += min(opportunities, 10) * 0.03
+    quality -= min(registers, 255) / 2550.0 + min(shared, 98304) / 983040.0
+    return {
+        "state": state,
+        "performance": performance,
+        "architecture": architecture,
+        "registers": registers,
+        "shared": shared,
+        "opportunities": opportunities,
+        "mean_rank": mean_rank,
+        "quality": quality,
+        "signature": _stage_structure_signature(ir),
+    }
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_perf = left["performance"] if left["performance"] is not None else left["architecture"]
+    right_perf = right["performance"] if right["performance"] is not None else right["architecture"]
+    not_worse = (
+        left_perf >= right_perf
+        and left["opportunities"] >= right["opportunities"]
+        and left["registers"] <= right["registers"]
+        and left["shared"] <= right["shared"]
     )
+    strictly_better = (
+        left_perf > right_perf
+        or left["opportunities"] > right["opportunities"]
+        or left["registers"] < right["registers"]
+        or left["shared"] < right["shared"]
+    )
+    return not_worse and strictly_better
 
-    def rank(state):
-        # Path components encode local LLM candidate order. Do not rank incomplete
-        # kernels using inherited/stale GFLOPS from the initial skeleton.
-        ranks = [int_or_default(value, 1) for value in state.get("path_code", [])]
-        mean_rank = sum(ranks) / len(ranks) if ranks else 1.0
-        ir = state.get("current_ir", {})
-        shared = ir_get(ir, "resource.shared_memory.total_bytes", 0)
-        try:
-            shared = float(shared or 0)
-        except (TypeError, ValueError):
-            shared = float("inf")
-        architecture_score = ir_get(ir, "resource.tiling_candidate.architecture_score")
-        try:
-            architecture_score = float(architecture_score)
-        except (TypeError, ValueError):
-            architecture_score = float("-inf")
-        if has_architecture_scores:
-            return -architecture_score, mean_rank, shared, tuple(ranks)
-        return mean_rank, shared, tuple(ranks)
 
-    ordered = sorted(states, key=rank)
-    return ordered[:top_k], ordered[top_k:]
+def _stage_structure_signature(ir: dict[str, Any]) -> tuple[Any, ...]:
+    paths = (
+        "tiling.block_m", "tiling.block_n", "tiling.block_k",
+        "tiling.warp_tile.warp_m", "tiling.warp_tile.warp_n",
+        "tiling.thread_tile.thread_m", "tiling.thread_tile.thread_n",
+        "layout.shared_A", "layout.shared_B", "pipeline.mode",
+        "vectorization.A.vector_width", "vectorization.B.vector_width", "vectorization.C.vector_width",
+    )
+    return tuple(ir_get(ir, path) for path in paths)
+
+
+def _structure_distance(left: tuple[Any, ...], right: tuple[Any, ...]) -> float:
+    comparable = [(a, b) for a, b in zip(left, right) if a is not None or b is not None]
+    if not comparable:
+        return 0.0
+    return sum(a != b for a, b in comparable) / len(comparable)
 
 
 def build_phase1_compile_shortlist(

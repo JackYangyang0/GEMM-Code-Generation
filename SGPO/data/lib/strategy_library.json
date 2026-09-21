@@ -99,7 +99,10 @@
               },
               "risk_level": "medium",
               "priority": 90,
-              "maturity": "v1"
+              "maturity": "v1",
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.128x128x16"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.128x128x8",
@@ -120,7 +123,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.128x128x8"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.128x64x16",
@@ -141,7 +147,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.128x64x16"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.32x32x8",
@@ -162,7 +171,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.32x32x8"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.32x64x16",
@@ -183,7 +195,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.32x64x16"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.64x128x16",
@@ -204,7 +219,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.64x128x16"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.64x64x16",
@@ -225,7 +243,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.64x64x16"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.32x128x16",
@@ -382,7 +403,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.32x128x16"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.64x32x16",
@@ -539,7 +563,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.64x32x16"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.128x32x16",
@@ -696,7 +723,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.128x32x16"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.64x64x32",
@@ -853,7 +883,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.64x64x32"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.64x128x32",
@@ -1010,7 +1043,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.64x128x32"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.128x64x32",
@@ -1167,7 +1203,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.128x64x32"
+              ]
             },
             {
               "strategy_id": "Tiling.BlockTile.128x128x32",
@@ -1324,7 +1363,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.BlockTile.128x128x32"
+              ]
             }
           ]
         },
@@ -1352,7 +1394,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.16x32"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.32x32",
@@ -1375,7 +1420,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.32x32"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.32x64",
@@ -1398,7 +1446,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.32x64"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.64x32",
@@ -1421,7 +1472,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.64x32"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.64x64",
@@ -1444,7 +1498,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.64x64"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.ParametricWMxWN",
@@ -1467,7 +1524,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.ParametricWMxWN"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.WMxWN",
@@ -1490,7 +1550,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.WMxWN"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.16x16",
@@ -1621,7 +1684,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.16x16"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.16x64",
@@ -1752,7 +1818,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.16x64"
+              ]
             },
             {
               "strategy_id": "Tiling.WarpTile.64x16",
@@ -1883,7 +1952,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.WarpTile.64x16"
+              ]
             }
           ]
         },
@@ -1912,7 +1984,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.ThreadTile.2x2"
+              ]
             },
             {
               "strategy_id": "Tiling.ThreadTile.4x4",
@@ -1936,7 +2011,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.ThreadTile.4x4"
+              ]
             },
             {
               "strategy_id": "Tiling.ThreadTile.4x8",
@@ -2073,7 +2151,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.ThreadTile.4x8"
+              ]
             },
             {
               "strategy_id": "Tiling.ThreadTile.8x4",
@@ -2210,7 +2291,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.ThreadTile.8x4"
+              ]
             },
             {
               "strategy_id": "Tiling.ThreadTile.2x4",
@@ -2358,7 +2442,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.ThreadTile.2x4"
+              ]
             },
             {
               "strategy_id": "Tiling.ThreadTile.4x2",
@@ -2506,7 +2593,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.ThreadTile.4x2"
+              ]
             },
             {
               "strategy_id": "Tiling.ThreadTile.2x8",
@@ -2654,7 +2744,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.ThreadTile.2x8"
+              ]
             },
             {
               "strategy_id": "Tiling.ThreadTile.8x2",
@@ -2802,7 +2895,10 @@
                 "template": "launch_config_constants",
                 "llm_required": false,
                 "scope": "local_anchor_region_or_ir_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tiling.ThreadTile.8x2"
+              ]
             }
           ]
         },
@@ -2836,7 +2932,10 @@
               "priority": 50,
               "synthesized_from_index": true,
               "phase": "excluded_default",
-              "implementation_status": "unavailable_distinct_lane_mapping"
+              "implementation_status": "unavailable_distinct_lane_mapping",
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.LaneLayout.1DContiguousM"
+              ]
             },
             {
               "strategy_id": "Mapping.LaneLayout.1DContiguousN",
@@ -2865,7 +2964,10 @@
               "priority": 50,
               "synthesized_from_index": true,
               "phase": "excluded_default",
-              "implementation_status": "unavailable_distinct_lane_mapping"
+              "implementation_status": "unavailable_distinct_lane_mapping",
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.LaneLayout.1DContiguousN"
+              ]
             },
             {
               "strategy_id": "Mapping.LaneLayout.2D_8x4",
@@ -2894,7 +2996,10 @@
               "priority": 50,
               "synthesized_from_index": true,
               "phase": "excluded_default",
-              "implementation_status": "unavailable_fixed_8x4_mapping"
+              "implementation_status": "unavailable_fixed_8x4_mapping",
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.LaneLayout.2D_8x4"
+              ]
             },
             {
               "strategy_id": "Mapping.Warp.BasicWidLane",
@@ -2921,7 +3026,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.Warp.BasicWidLane"
+              ]
             },
             {
               "strategy_id": "Mapping.Warp.OutputFragment2D",
@@ -2948,7 +3056,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.Warp.OutputFragment2D"
+              ]
             },
             {
               "strategy_id": "Mapping.WarpThreadTile.WarpLaneFragmentBasic",
@@ -2975,7 +3086,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.WarpThreadTile.WarpLaneFragmentBasic"
+              ]
             },
             {
               "strategy_id": "Mapping.WarpThreadTile.WarpLaneFragment2D",
@@ -3002,7 +3116,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.WarpThreadTile.WarpLaneFragment2D"
+              ]
             }
           ]
         }
@@ -3033,7 +3150,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.AB.Basic"
+              ]
             }
           ]
         },
@@ -3099,7 +3219,10 @@
                 "memory.shared_A.shape",
                 "memory.shared_B.shape"
               ],
-              "risk_level": "low"
+              "risk_level": "low",
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.BankConflictAnalysis"
+              ]
             },
             {
               "strategy_id": "Layout.SharedMemory.PaddingA.Plus1",
@@ -3120,7 +3243,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.PaddingA.Plus1"
+              ]
             },
             {
               "strategy_id": "Layout.SharedMemory.PaddingAB.Plus1",
@@ -3141,7 +3267,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.PaddingAB.Plus1"
+              ]
             },
             {
               "strategy_id": "Layout.SharedMemory.PaddingB.Plus1",
@@ -3162,7 +3291,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.PaddingB.Plus1"
+              ]
             },
             {
               "strategy_id": "Layout.SharedMemory.SkewA.Xor",
@@ -3285,6 +3417,9 @@
                 "Preserve vector alignment or scalarize only accesses whose transformed coordinates are not vector-contiguous.",
                 "Apply the same map to global-to-shared stores and all shared-to-register loads, including pipeline prologue and epilogue.",
                 "Do not claim bank-conflict reduction from a non-null layout field; use measured bank-conflict counters when available."
+              ],
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.SkewA.Xor"
               ]
             },
             {
@@ -3408,6 +3543,9 @@
                 "Preserve vector alignment or scalarize only accesses whose transformed coordinates are not vector-contiguous.",
                 "Apply the same map to global-to-shared stores and all shared-to-register loads, including pipeline prologue and epilogue.",
                 "Do not claim bank-conflict reduction from a non-null layout field; use measured bank-conflict counters when available."
+              ],
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.SkewB.Xor"
               ]
             },
             {
@@ -3416,7 +3554,7 @@
               "category": "Layout",
               "subphase": "Layout.SharedMemoryTransform",
               "maturity": "v1",
-              "principle": "Synthesized library entry for Layout.SharedMemory.TransposeA from strategy_index allowed_strategy_ids.",
+              "principle": "Store A tiles with K-major, M-contiguous shared layout. Change the declaration, initial and subsequent producers, and compute consumers together; a shared declaration alone does not implement transpose.",
               "preconditions": [
                 "memory.shared_A.shape != null",
                 "memory.shared_B.shape != null"
@@ -3428,8 +3566,17 @@
                 "memory.shared_B.padding != null"
               ],
               "ir_updates": {},
+              "implementation_obligations": [
+                "A shared storage uses [stage][K][M] or a proven equivalent representation.",
+                "Each global A float4 contains four consecutive K values; scatter components along shared K, not shared M.",
+                "Update SHARED_DECL, GLOBAL_TO_SHARED_LOAD, NEXT_TILE_LOAD and COMPUTE_INNER consistently.",
+                "Preserve the selected layout through subsequent patches and repairs."
+              ],
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.TransposeA"
+              ]
             },
             {
               "strategy_id": "Layout.SharedMemory.TransposeB",
@@ -3450,7 +3597,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.TransposeB"
+              ]
             },
             {
               "strategy_id": "Layout.SharedMemory.WarpAwareSwizzleA",
@@ -3554,7 +3704,10 @@
                 "mode": "llm_structured_patch",
                 "llm_required": true,
                 "scope": "local_anchor_regions_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.WarpAwareSwizzleA"
+              ]
             },
             {
               "strategy_id": "Layout.SharedMemory.WarpAwareSwizzleB",
@@ -3658,10 +3811,16 @@
                 "mode": "llm_structured_patch",
                 "llm_required": true,
                 "scope": "local_anchor_regions_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.WarpAwareSwizzleB"
+              ]
             },
             {
               "strategy_id": "Memory.SharedMemory.DynamicOptIn",
+              "implementation_example_ids": [
+                "shared_dynamic_optin_v1"
+              ],
               "stage": "Layout",
               "category": "Layout",
               "subphase": "Layout.SharedMemoryTransform",
@@ -3819,7 +3978,10 @@
               "priority": 50,
               "synthesized_from_index": true,
               "alias_of": "Register.AccumulatorLayout.2DArray",
-              "canonical_strategy_id": "Register.AccumulatorLayout.2DArray"
+              "canonical_strategy_id": "Register.AccumulatorLayout.2DArray",
+              "implementation_example_ids": [
+                "strategy_reference.Layout.RegisterTile.C"
+              ]
             },
             {
               "strategy_id": "Register.AccumulatorLayout.2DArray",
@@ -3838,7 +4000,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Register.AccumulatorLayout.2DArray"
+              ]
             },
             {
               "strategy_id": "Register.AccumulatorLayout.FlatArray",
@@ -3857,7 +4022,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Register.AccumulatorLayout.FlatArray"
+              ]
             },
             {
               "strategy_id": "Register.AccumulatorLayout.ScalarUnrolled",
@@ -3876,7 +4044,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Register.AccumulatorLayout.ScalarUnrolled"
+              ]
             }
           ]
         }
@@ -4108,7 +4279,10 @@
                 "synchronization.sync_policy.after_global_to_shared_load": true,
                 "synchronization.sync_policy.before_shared_buffer_reuse": true
               },
-              "priority": 50
+              "priority": 50,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.LoadCompute.SeparatePhases"
+              ]
             }
           ]
         },
@@ -4134,7 +4308,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.VectorizedStoreA.float4"
+              ]
             },
             {
               "strategy_id": "Layout.SharedMemory.VectorizedStoreB.float4",
@@ -4155,7 +4332,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Layout.SharedMemory.VectorizedStoreB.float4"
+              ]
             },
             {
               "strategy_id": "Reordering.ThreadMapping.CoalescedLoadA",
@@ -4176,7 +4356,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.ThreadMapping.CoalescedLoadA"
+              ]
             },
             {
               "strategy_id": "Reordering.ThreadMapping.CoalescedLoadB",
@@ -4197,7 +4380,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.ThreadMapping.CoalescedLoadB"
+              ]
             },
             {
               "strategy_id": "Reordering.WarpSharedLoad.StripMined",
@@ -4218,7 +4404,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.WarpSharedLoad.StripMined"
+              ]
             }
           ]
         },
@@ -4245,7 +4434,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Register.CacheA.Fragment"
+              ]
             },
             {
               "strategy_id": "Register.CacheB.Fragment",
@@ -4267,7 +4459,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Register.CacheB.Fragment"
+              ]
             },
             {
               "strategy_id": "Register.FFMA.ScheduleInterleaved",
@@ -4289,7 +4484,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Register.FFMA.ScheduleInterleaved"
+              ]
             },
             {
               "strategy_id": "Register.FFMA.ScheduleOuterProduct",
@@ -4311,7 +4509,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Register.FFMA.ScheduleOuterProduct"
+              ]
             },
             {
               "strategy_id": "Reordering.KLoop.ManualUnroll",
@@ -4333,7 +4534,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.KLoop.ManualUnroll"
+              ]
             },
             {
               "strategy_id": "Reordering.KLoop.NoUnrollForRegisterPressure",
@@ -4355,7 +4559,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.KLoop.NoUnrollForRegisterPressure"
+              ]
             },
             {
               "strategy_id": "Reordering.KLoop.PragmaUnroll",
@@ -4377,7 +4584,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.KLoop.PragmaUnroll"
+              ]
             },
             {
               "strategy_id": "Reordering.KLoop.Unroll4",
@@ -4399,7 +4609,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.KLoop.Unroll4"
+              ]
             },
             {
               "strategy_id": "Reordering.KLoop.Unroll8",
@@ -4533,7 +4746,10 @@
               },
               "risk_level": "medium",
               "priority": 80,
-              "maturity": "v1"
+              "maturity": "v1",
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.KLoop.Unroll8"
+              ]
             },
             {
               "strategy_id": "Reordering.KLoop.UnrollBK",
@@ -4555,7 +4771,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.KLoop.UnrollBK"
+              ]
             },
             {
               "strategy_id": "Reordering.KLoop.UnrollMicroK",
@@ -4577,7 +4796,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.KLoop.UnrollMicroK"
+              ]
             },
             {
               "strategy_id": "Reordering.WarpCompute.KOuterInnerSchedule",
@@ -4599,7 +4821,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.WarpCompute.KOuterInnerSchedule"
+              ]
             },
             {
               "strategy_id": "Reordering.ComputeBundle.RegisterTiledOuterProduct",
@@ -4786,7 +5011,10 @@
                 "mode": "llm_structured_patch",
                 "llm_required": true,
                 "scope": "local_anchor_regions_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.ComputeBundle.RegisterTiledOuterProduct"
+              ]
             }
           ]
         }
@@ -4815,7 +5043,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Safety.AssumeDivisibleAligned"
+              ]
             },
             {
               "strategy_id": "Safety.BoundaryPolicy.GeneralGuarded",
@@ -4834,7 +5065,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Safety.BoundaryPolicy.GeneralGuarded"
+              ]
             },
             {
               "strategy_id": "Safety.BoundaryPolicy.MaskLoad",
@@ -4853,7 +5087,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Safety.BoundaryPolicy.MaskLoad"
+              ]
             },
             {
               "strategy_id": "Safety.BoundaryPolicy.PaddingInput",
@@ -4872,7 +5109,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Safety.BoundaryPolicy.PaddingInput"
+              ]
             },
             {
               "strategy_id": "Safety.BoundaryPolicy.ScalarFallback",
@@ -4891,7 +5131,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Safety.BoundaryPolicy.ScalarFallback"
+              ]
             },
             {
               "strategy_id": "Safety.BoundaryPolicy.SeparateTailKernel",
@@ -4910,7 +5153,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Safety.BoundaryPolicy.SeparateTailKernel"
+              ]
             },
             {
               "strategy_id": "Safety.BoundaryPolicy.StaticDivisibleNoGuard",
@@ -4929,7 +5175,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Safety.BoundaryPolicy.StaticDivisibleNoGuard"
+              ]
             },
             {
               "strategy_id": "Vectorization.AlignmentGuard",
@@ -4948,7 +5197,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Vectorization.AlignmentGuard"
+              ]
             }
           ]
         },
@@ -4957,6 +5209,9 @@
           "strategies": [
             {
               "strategy_id": "Reordering.CooperativeVectorLoadAB.float4",
+              "implementation_example_ids": [
+                "fp32_vector_tile_load_v1"
+              ],
               "stage": "Vectorization",
               "category": "Vectorization",
               "subphase": "Vectorization.LoadVectorization",
@@ -4995,10 +5250,16 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.WarpCooperativeLoadA.float4"
+              ]
             },
             {
               "strategy_id": "Reordering.WarpCooperativeLoadAB.float4",
+              "implementation_example_ids": [
+                "fp32_vector_tile_load_v1"
+              ],
               "stage": "Vectorization",
               "category": "Vectorization",
               "subphase": "Vectorization.LoadVectorization",
@@ -5037,7 +5298,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Reordering.WarpCooperativeLoadB.float4"
+              ]
             },
             {
               "strategy_id": "Vectorization.GlobalLoadA.float2",
@@ -5058,10 +5322,16 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Vectorization.GlobalLoadA.float2"
+              ]
             },
             {
               "strategy_id": "Vectorization.GlobalLoadAB.float4",
+              "implementation_example_ids": [
+                "fp32_vector_tile_load_v1"
+              ],
               "stage": "Vectorization",
               "category": "Vectorization",
               "subphase": "Vectorization.LoadVectorization",
@@ -5100,7 +5370,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Vectorization.GlobalLoadB.float2"
+              ]
             }
           ]
         },
@@ -5122,6 +5395,10 @@
           "strategies": [
             {
               "strategy_id": "Pipeline.DoubleBuffer.SharedAB",
+              "implementation_example_ids": [
+                "sync_double_buffer_v1"
+              ],
+              "phase": "phase1_core_coupled",
               "stage": "Pipeline",
               "category": "Pipeline",
               "subphase": "Pipeline.BufferingSelection",
@@ -5142,6 +5419,10 @@
             },
             {
               "strategy_id": "Pipeline.DoubleBuffer.SharedAB.V1Enabled",
+              "implementation_example_ids": [
+                "sync_double_buffer_v1"
+              ],
+              "phase": "phase1_core_coupled",
               "stage": "Pipeline",
               "category": "Pipeline",
               "subphase": "Pipeline.BufferingSelection",
@@ -5179,10 +5460,17 @@
               "ir_updates": {},
               "priority": 50,
               "synthesized_from_index": true,
-              "optimization_role": "keep_current"
+              "optimization_role": "keep_current",
+              "implementation_example_ids": [
+                "strategy_reference.Pipeline.NoAsyncCopy.V1"
+              ]
             },
             {
               "strategy_id": "Pipeline.WarpAwareDoubleBuffer.SharedAB",
+              "implementation_example_ids": [
+                "sync_double_buffer_v1"
+              ],
+              "phase": "phase1_core_coupled",
               "stage": "Pipeline",
               "category": "Pipeline",
               "subphase": "Pipeline.BufferingSelection",
@@ -5203,6 +5491,9 @@
             },
             {
               "strategy_id": "Pipeline.CpAsync.Multistage3.SharedAB",
+              "implementation_example_ids": [
+                "cp_async_primitive_v1"
+              ],
               "stage": "Pipeline",
               "category": "Pipeline",
               "subphase": "Pipeline.BufferingSelection",
@@ -5413,7 +5704,9 @@
                 "Handle K-tile counts 0, 1, less than stage_count, exactly stage_count and larger; drain every outstanding group before exit/reuse.",
                 "Zero-fill invalid M/N/K lanes without forming invalid global pointers; never read unwritten padding/tail elements.",
                 "Keep physical shared shapes, padding, stage_count and auxiliary bytes in IR consistent with the code; replacing 2 stages with 3 allocates 3, not 6.",
-                "If dynamic shared memory is selected, use one extern __shared__ allocation and aligned non-overlapping A/B stage slices; the host launcher is configured by SGPO.",
+                "Materialize the requested stage count as compile-time static __shared__ A/B buffers; Multistage2 is a static double buffer.",
+                "Do not introduce extern __shared__, dynamic launch bytes or cudaFuncSetAttribute; dynamic allocation is owned by the separate Memory.SharedMemory.DynamicOptIn strategy.",
+                "Use __pipeline_memcpy_async/__pipeline_commit/__pipeline_wait_prior from the fixed cuda_pipeline.h capability include, or equivalent real cp.async PTX; never emit a comment-only marker.",
                 "Static evidence checks are not synchronization proofs. Run correctness, CUDA error checks, and compute-sanitizer racecheck/synccheck when available."
               ],
               "validation_cases": {
@@ -5427,12 +5720,13 @@
                 "include_nondivisible_mnk": true,
                 "include_nonzero_beta": true
               },
-              "coupled_with": [
-                "Memory.SharedMemory.DynamicOptIn"
-              ]
+              "coupled_with": []
             },
             {
               "strategy_id": "Pipeline.CpAsync.Multistage4.SharedAB",
+              "implementation_example_ids": [
+                "cp_async_primitive_v1"
+              ],
               "stage": "Pipeline",
               "category": "Pipeline",
               "subphase": "Pipeline.BufferingSelection",
@@ -5655,7 +5949,9 @@
                 "Handle K-tile counts 0, 1, less than stage_count, exactly stage_count and larger; drain every outstanding group before exit/reuse.",
                 "Zero-fill invalid M/N/K lanes without forming invalid global pointers; never read unwritten padding/tail elements.",
                 "Keep physical shared shapes, padding, stage_count and auxiliary bytes in IR consistent with the code; replacing 2 stages with 3 allocates 3, not 6.",
-                "If dynamic shared memory is selected, use one extern __shared__ allocation and aligned non-overlapping A/B stage slices; the host launcher is configured by SGPO.",
+                "Materialize the requested stage count as compile-time static __shared__ A/B buffers; Multistage2 is a static double buffer.",
+                "Do not introduce extern __shared__, dynamic launch bytes or cudaFuncSetAttribute; dynamic allocation is owned by the separate Memory.SharedMemory.DynamicOptIn strategy.",
+                "Use __pipeline_memcpy_async/__pipeline_commit/__pipeline_wait_prior from the fixed cuda_pipeline.h capability include, or equivalent real cp.async PTX; never emit a comment-only marker.",
                 "Static evidence checks are not synchronization proofs. Run correctness, CUDA error checks, and compute-sanitizer racecheck/synccheck when available."
               ],
               "validation_cases": {
@@ -5669,12 +5965,13 @@
                 "include_nondivisible_mnk": true,
                 "include_nonzero_beta": true
               },
-              "coupled_with": [
-                "Memory.SharedMemory.DynamicOptIn"
-              ]
+              "coupled_with": []
             },
             {
               "strategy_id": "Pipeline.CpAsync.Multistage2.SharedAB",
+              "implementation_example_ids": [
+                "cp_async_primitive_v1"
+              ],
               "stage": "Pipeline",
               "category": "Pipeline",
               "subphase": "Pipeline.BufferingSelection",
@@ -5885,7 +6182,9 @@
                 "Handle K-tile counts 0, 1, less than stage_count, exactly stage_count and larger; drain every outstanding group before exit/reuse.",
                 "Zero-fill invalid M/N/K lanes without forming invalid global pointers; never read unwritten padding/tail elements.",
                 "Keep physical shared shapes, padding, stage_count and auxiliary bytes in IR consistent with the code; replacing 2 stages with 3 allocates 3, not 6.",
-                "If dynamic shared memory is selected, use one extern __shared__ allocation and aligned non-overlapping A/B stage slices; the host launcher is configured by SGPO.",
+                "Materialize the requested stage count as compile-time static __shared__ A/B buffers; Multistage2 is a static double buffer.",
+                "Do not introduce extern __shared__, dynamic launch bytes or cudaFuncSetAttribute; dynamic allocation is owned by the separate Memory.SharedMemory.DynamicOptIn strategy.",
+                "Use __pipeline_memcpy_async/__pipeline_commit/__pipeline_wait_prior from the fixed cuda_pipeline.h capability include, or equivalent real cp.async PTX; never emit a comment-only marker.",
                 "Static evidence checks are not synchronization proofs. Run correctness, CUDA error checks, and compute-sanitizer racecheck/synccheck when available."
               ],
               "validation_cases": {
@@ -5899,9 +6198,7 @@
                 "include_nondivisible_mnk": true,
                 "include_nonzero_beta": true
               },
-              "coupled_with": [
-                "Memory.SharedMemory.DynamicOptIn"
-              ]
+              "coupled_with": []
             }
           ]
         },
@@ -5922,7 +6219,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Memory.Prefetch.GlobalToRegisterA"
+              ]
             },
             {
               "strategy_id": "Memory.Prefetch.GlobalToRegisterB",
@@ -5938,7 +6238,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Memory.Prefetch.GlobalToRegisterB"
+              ]
             },
             {
               "strategy_id": "Pipeline.WarpRegisterPrefetchAB",
@@ -5946,7 +6249,9 @@
               "category": "Pipeline",
               "subphase": "Pipeline.PrefetchSelection",
               "maturity": "v1",
-              "principle": "Synthesized library entry for Pipeline.WarpRegisterPrefetchAB from strategy_index allowed_strategy_ids.",
+              "principle": "Prefetch the next A/B tile into thread-owned registers before current-tile computation, then publish it to the next shared buffer with correct producer/consumer synchronization. Preserve selected tile geometry and input vector ownership.",
+              "provides_fields": ["pipeline.prefetch", "resource.register.prefetch_slots"],
+              "allowed_ir_fields": ["pipeline.prefetch", "resource.register.prefetch_slots"],
               "preconditions": [],
               "postconditions": [
                 "pipeline.prefetch != null",
@@ -5954,7 +6259,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Pipeline.WarpRegisterPrefetchAB"
+              ]
             }
           ]
         },
@@ -6011,7 +6319,10 @@
               },
               "risk_level": "medium",
               "priority": 75,
-              "maturity": "v1"
+              "maturity": "v1",
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.CTASwizzle.GroupedN"
+              ]
             },
             {
               "strategy_id": "Mapping.CTASwizzle.GroupedM",
@@ -6063,7 +6374,10 @@
               },
               "risk_level": "medium",
               "priority": 75,
-              "maturity": "v1"
+              "maturity": "v1",
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.CTASwizzle.GroupedM"
+              ]
             },
             {
               "strategy_id": "Memory.L2Reuse.CTASwizzleGroupedN",
@@ -6115,7 +6429,10 @@
               },
               "risk_level": "medium",
               "priority": 75,
-              "maturity": "v1"
+              "maturity": "v1",
+              "implementation_example_ids": [
+                "strategy_reference.Memory.L2Reuse.CTASwizzleGroupedN"
+              ]
             },
             {
               "strategy_id": "Memory.L2Reuse.CTASwizzleGroupedM",
@@ -6167,7 +6484,10 @@
               },
               "risk_level": "medium",
               "priority": 75,
-              "maturity": "v1"
+              "maturity": "v1",
+              "implementation_example_ids": [
+                "strategy_reference.Memory.L2Reuse.CTASwizzleGroupedM"
+              ]
             },
             {
               "strategy_id": "Scheduling.PersistentCTA.StaticTileLoop",
@@ -6219,7 +6539,10 @@
               },
               "risk_level": "medium",
               "priority": 75,
-              "maturity": "v1"
+              "maturity": "v1",
+              "implementation_example_ids": [
+                "strategy_reference.Scheduling.PersistentCTA.StaticTileLoop"
+              ]
             },
             {
               "strategy_id": "Reduction.StreamK.WorkDecomposition",
@@ -6315,7 +6638,10 @@
                 "alpha/beta applied once",
                 "workspace+reduction included in measured time"
               ],
-              "selection_policy": "Consider low CTA/SM and long-K work as well as large matrices; estimate split overhead before activation."
+              "selection_policy": "Consider low CTA/SM and long-K work as well as large matrices; estimate split overhead before activation.",
+              "implementation_example_ids": [
+                "strategy_reference.Reduction.StreamK.WorkDecomposition"
+              ]
             },
             {
               "strategy_id": "Scheduling.PersistentCTA.GridStrideTiles",
@@ -6449,7 +6775,10 @@
                 "mode": "llm_structured_patch",
                 "llm_required": true,
                 "scope": "local_anchor_regions_only"
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Scheduling.PersistentCTA.GridStrideTiles"
+              ]
             },
             {
               "strategy_id": "Reduction.SplitK.Workspace",
@@ -6474,7 +6803,7 @@
                       "field": "problem.K"
                     },
                     "rhs": {
-                      "const": 2048
+                      "const": 1
                     }
                   },
                   {
@@ -6575,7 +6904,7 @@
               "risk_level": "high",
               "priority": 84,
               "maturity": "v1",
-              "phase": "excluded_default",
+              "phase": "phase2_unlock_general",
               "canonical_strategy_id": "Reduction.SplitK.Workspace",
               "alias_of": null,
               "conflict_group": "large_matrix.work_decomposition",
@@ -6595,7 +6924,7 @@
                 "mapping.threads_per_block"
               ],
               "materialization": {
-                "mode": "orchestrator_required",
+                "mode": "bounded_resource_unlock",
                 "llm_required": false
               },
               "activation_status": "executor_required",
@@ -6607,7 +6936,10 @@
                 "alpha/beta applied once",
                 "workspace+reduction included in measured time"
               ],
-              "selection_policy": "Consider low CTA/SM and long-K work as well as large matrices; estimate split overhead before activation."
+              "selection_policy": "Consider low CTA/SM and long-K work as well as large matrices; estimate split overhead before activation.",
+              "implementation_example_ids": [
+                "strategy_reference.Reduction.SplitK.Workspace"
+              ]
             },
             {
               "strategy_id": "Memory.L2Persistence.AccessWindow",
@@ -6702,6 +7034,9 @@
                 "own or restore stream access-policy window and context set-aside",
                 "respect MIG/MPS restrictions and queried nonzero limits",
                 "include configuration cost in end-to-end report"
+              ],
+              "implementation_example_ids": [
+                "strategy_reference.Memory.L2Persistence.AccessWindow"
               ]
             }
           ]
@@ -6727,7 +7062,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.AlphaBeta.General"
+              ]
             },
             {
               "strategy_id": "Epilogue.BetaOne.FastPath",
@@ -6742,7 +7080,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.BetaOne.FastPath"
+              ]
             },
             {
               "strategy_id": "Epilogue.BetaZero.FastPath",
@@ -6757,7 +7098,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.BetaZero.FastPath"
+              ]
             }
           ]
         },
@@ -6777,7 +7121,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.Fusion.Bias"
+              ]
             },
             {
               "strategy_id": "Epilogue.Fusion.GELU",
@@ -6792,7 +7139,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.Fusion.GELU"
+              ]
             },
             {
               "strategy_id": "Epilogue.Fusion.ReLU",
@@ -6807,7 +7157,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.Fusion.ReLU"
+              ]
             }
           ]
         },
@@ -6828,7 +7181,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.StoreC.CoalescedScalar"
+              ]
             },
             {
               "strategy_id": "Epilogue.StoreC.Vectorized.float2",
@@ -6844,7 +7200,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.StoreC.Vectorized.float2"
+              ]
             },
             {
               "strategy_id": "Epilogue.StoreC.Vectorized.float4",
@@ -6860,7 +7219,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Epilogue.StoreC.Vectorized.float4"
+              ]
             },
             {
               "strategy_id": "Mapping.WarpStore.CoalescedC",
@@ -6876,7 +7238,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Mapping.WarpStore.CoalescedC"
+              ]
             },
             {
               "strategy_id": "Vectorization.StoreC.AlignedNoGuard",
@@ -6892,7 +7257,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Vectorization.StoreC.AlignedNoGuard"
+              ]
             },
             {
               "strategy_id": "Vectorization.StoreC.GuardedVectorStore",
@@ -6908,7 +7276,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Vectorization.StoreC.GuardedVectorStore"
+              ]
             },
             {
               "strategy_id": "Vectorization.StoreC.SafeScalar",
@@ -6924,7 +7295,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Vectorization.StoreC.SafeScalar"
+              ]
             },
             {
               "strategy_id": "Vectorization.StoreC.float2",
@@ -6940,7 +7314,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Vectorization.StoreC.float2"
+              ]
             },
             {
               "strategy_id": "Vectorization.StoreC.float4",
@@ -6956,7 +7333,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Vectorization.StoreC.float4"
+              ]
             }
           ]
         }
@@ -6981,7 +7361,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Compiler.FastMath.Enabled"
+              ]
             },
             {
               "strategy_id": "Compiler.ForceInline.DeviceFunctions",
@@ -6996,7 +7379,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Compiler.ForceInline.DeviceFunctions"
+              ]
             },
             {
               "strategy_id": "Compiler.LaunchBounds.MaxThreads",
@@ -7046,8 +7432,8 @@
               "priority": 50,
               "name": "Compiler.LaunchBounds.MaxThreads",
               "title": "Compiler.LaunchBounds.MaxThreads",
-              "phase": "excluded_default",
-              "activation_status": "executor_required",
+              "phase": "phase2_unlock_general",
+              "activation_status": "deterministic_unlock_only",
               "alias_of": null,
               "canonical_strategy_id": "Compiler.LaunchBounds.MaxThreads",
               "conflict_group": "compiler.launch_bounds",
@@ -7066,9 +7452,12 @@
                 "compile/register/spill and runtime feedback"
               ],
               "materialization": {
-                "mode": "orchestrator_required",
+                "mode": "bounded_resource_unlock",
                 "llm_required": false
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Compiler.LaunchBounds.MaxThreads"
+              ]
             },
             {
               "strategy_id": "Compiler.LaunchBounds.MinBlocksPerSM",
@@ -7118,8 +7507,8 @@
               "priority": 50,
               "name": "Compiler.LaunchBounds.MinBlocksPerSM",
               "title": "Compiler.LaunchBounds.MinBlocksPerSM",
-              "phase": "excluded_default",
-              "activation_status": "executor_required",
+              "phase": "phase2_unlock_general",
+              "activation_status": "deterministic_unlock_only",
               "alias_of": null,
               "canonical_strategy_id": "Compiler.LaunchBounds.MinBlocksPerSM",
               "conflict_group": "compiler.launch_bounds",
@@ -7138,9 +7527,12 @@
                 "compile/register/spill and runtime feedback"
               ],
               "materialization": {
-                "mode": "orchestrator_required",
+                "mode": "bounded_resource_unlock",
                 "llm_required": false
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Compiler.LaunchBounds.MinBlocksPerSM"
+              ]
             },
             {
               "strategy_id": "Compiler.RestrictPointer",
@@ -7155,7 +7547,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Compiler.RestrictPointer"
+              ]
             },
             {
               "strategy_id": "Compiler.TemplateSpecialization.ShapeStatic",
@@ -7170,7 +7565,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Compiler.TemplateSpecialization.ShapeStatic"
+              ]
             },
             {
               "strategy_id": "Memory.SharedMemory.Carveout.0",
@@ -7271,7 +7669,10 @@
               "materialization": {
                 "mode": "host_launch_config",
                 "llm_required": false
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Memory.SharedMemory.Carveout.0"
+              ]
             },
             {
               "strategy_id": "Memory.SharedMemory.Carveout.50",
@@ -7372,7 +7773,10 @@
               "materialization": {
                 "mode": "host_launch_config",
                 "llm_required": false
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Memory.SharedMemory.Carveout.50"
+              ]
             },
             {
               "strategy_id": "Memory.SharedMemory.Carveout.100",
@@ -7473,7 +7877,10 @@
               "materialization": {
                 "mode": "host_launch_config",
                 "llm_required": false
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Memory.SharedMemory.Carveout.100"
+              ]
             }
           ]
         },
@@ -7494,7 +7901,10 @@
               ],
               "ir_updates": {},
               "priority": 50,
-              "synthesized_from_index": true
+              "synthesized_from_index": true,
+              "implementation_example_ids": [
+                "strategy_reference.Compiler.Ptxas.MaxRegisterCount"
+              ]
             },
             {
               "strategy_id": "Scheduling.WaveQuantization.SMResidentBlocks",
@@ -7546,7 +7956,10 @@
               },
               "risk_level": "medium",
               "priority": 75,
-              "maturity": "v1"
+              "maturity": "v1",
+              "implementation_example_ids": [
+                "strategy_reference.Scheduling.WaveQuantization.SMResidentBlocks"
+              ]
             },
             {
               "strategy_id": "Tuning.WarpOccupancyBalance",
@@ -7618,7 +8031,10 @@
               "materialization": {
                 "mode": "orchestrator_required",
                 "llm_required": false
-              }
+              },
+              "implementation_example_ids": [
+                "strategy_reference.Tuning.WarpOccupancyBalance"
+              ]
             },
             {
               "strategy_id": "Compiler.ResourceFeedback.PtxasOccupancySweep",
@@ -7745,7 +8161,10 @@
                 "mode": "compiler_resource_sweep",
                 "llm_required": false
               },
-              "activation_status": "enabled"
+              "activation_status": "enabled",
+              "implementation_example_ids": [
+                "strategy_reference.Compiler.ResourceFeedback.PtxasOccupancySweep"
+              ]
             }
           ]
         }

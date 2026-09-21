@@ -10,6 +10,7 @@ from typing import Any
 
 from SGPO.generate_ir.ir_checker import check_after_codegen
 from SGPO.llm.openai_client import OpenAICompatibleClient
+from SGPO.llm.patch_contract import normalize_patch_contract
 from SGPO.utils.common_utils import load_config, load_json, save_json
 
 
@@ -53,6 +54,15 @@ def generate_patch_with_llm(
     prompt_path=DEFAULT_PROMPT,
     repair_context=None,
 ):
+    from SGPO.verification.compiler_hint_transform import HINTS
+    if strategy.get('strategy_id') in HINTS:
+        return validate_patch_response({
+            'strategy_id': strategy['strategy_id'],
+            'ir_updates': copy.deepcopy(strategy.get('ir_updates') or {}),
+            'generation_method': 'narrow_compiler_hint',
+            'expected_effect': 'Apply only signature/device-function qualifiers; preserve all algorithm code.',
+        }, strategy['strategy_id'])
+    strategy = normalize_patch_contract(strategy)
     messages = build_patch_messages(
         ir=ir,
         strategy=strategy,
@@ -68,6 +78,7 @@ def generate_patch_with_llm(
 
 
 def validate_patch_scope(patch: dict[str, Any], strategy: dict[str, Any]) -> None:
+    strategy = normalize_patch_contract(strategy)
     contract = strategy.get("patch_contract") or {}
     if not contract:
         return
@@ -97,10 +108,12 @@ def build_patch_messages(
     prompt_path=DEFAULT_PROMPT,
     repair_context=None,
 ):
+    strategy = normalize_patch_contract(strategy)
+    from SGPO.llm.strategy_examples import strategy_with_examples
     template = prompt_path.read_text(encoding="utf-8")
     prompt = template.format(
         current_ir_json=json.dumps(compact_ir_for_prompt(ir), ensure_ascii=False, indent=2),
-        strategy_json=json.dumps(strategy, ensure_ascii=False, indent=2),
+        strategy_json=json.dumps(strategy_with_examples(strategy), ensure_ascii=False, indent=2),
         precheck_json=json.dumps(precheck_item, ensure_ascii=False, indent=2),
         repair_context_json=json.dumps(repair_context or {}, ensure_ascii=False, indent=2),
         code_context_json=json.dumps(code_context, ensure_ascii=False, indent=2),

@@ -91,6 +91,13 @@ def build_joint_tiling_candidates(
                         "warps_per_block": warps_per_block,
                         "threads_per_block": threads_per_block,
                         "shared_memory_bytes": shared_memory_bytes,
+                        "buffer_feasibility": {
+                            "single_bytes": shared_memory_bytes,
+                            "double_bytes": 2 * shared_memory_bytes,
+                            "double_fits_default_limit": 2 * shared_memory_bytes <= max_shared,
+                            "default_limit_bytes": max_shared,
+                            "basis": "unpadded tile estimate; recheck actual layout and launch before use",
+                        },
                         "estimated_accumulators_per_thread": accumulator_count,
                         "estimated_registers_per_thread": estimated_registers,
                         "shape_class": shape_class(bm, bn),
@@ -103,32 +110,73 @@ def build_joint_tiling_candidates(
 
 
 def make_diverse_tiling_pool(candidates: list[dict[str, Any]], max_count: int) -> list[dict[str, Any]]:
-    """Round-robin across shape/resource groups before asking the LLM."""
+    """Keep strong and complementary complete tuples before asking the LLM.
+
+    A BlockTile must not be represented by a single arbitrary descendant.  That
+    used to hide strong WarpTile/ThreadTile combinations when the representative
+    happened to be chosen mainly for having about 128 threads.  Keep one
+    architecture-ranked tuple and one shape-balanced tuple per block, then add a
+    globally strong alternate when the prompt budget permits.
+    """
     if max_count <= 0 or len(candidates) <= max_count:
         return list(candidates)
-    result = []
-    used_ids = set()
+
     by_block: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
     for item in candidates:
         by_block.setdefault((item["BM"], item["BN"], item["BK"]), []).append(item)
-    for block_key in sorted(by_block):
-        if len(result) >= max_count:
-            break
-        representative = min(by_block[block_key], key=block_representative_score)
-        result.append(representative)
-        used_ids.add(representative["candidate_id"])
 
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for item in candidates:
-        if item["candidate_id"] in used_ids:
-            continue
-        key = (item["shape_class"], item["resource_class"])
-        groups.setdefault(key, []).append(item)
-    ordered_groups = sorted(groups)
-    while len(result) < max_count and any(groups.values()):
-        for key in ordered_groups:
-            if groups[key] and len(result) < max_count:
-                result.append(groups[key].pop(0))
+    primary_by_block = {
+        block_key: min(items, key=joint_candidate_sort_key)
+        for block_key, items in by_block.items()
+    }
+    complementary_by_block = {
+        block_key: min(items, key=balanced_block_representative_score)
+        for block_key, items in by_block.items()
+    }
+
+    result: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+
+    def add(item: dict[str, Any]) -> None:
+        candidate_id = item["candidate_id"]
+        if candidate_id not in used_ids and len(result) < max_count:
+            result.append(item)
+            used_ids.add(candidate_id)
+
+    # Preserve block-level coverage first.  Blocks with the strongest feasible
+    # descendants get priority only when max_count is smaller than block count.
+    for item in sorted(primary_by_block.values(), key=joint_candidate_sort_key):
+        add(item)
+
+    # Reserve one slot for a globally strong alternate that may differ only in
+    # the Warp/Thread mapping from a block's primary representative.
+    global_alternate = next(
+        (item for item in sorted(candidates, key=joint_candidate_sort_key)
+         if item["candidate_id"] not in used_ids),
+        None,
+    )
+    if global_alternate is not None:
+        add(global_alternate)
+
+    complementary_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in complementary_by_block.values():
+        complementary_groups.setdefault(item["shape_class"], []).append(item)
+    for items in complementary_groups.values():
+        items.sort(key=joint_candidate_sort_key)
+    ordered_shapes = sorted(
+        complementary_groups,
+        key=lambda shape: joint_candidate_sort_key(complementary_groups[shape][0]),
+    )
+    while len(result) < max_count and any(complementary_groups.values()):
+        for shape in ordered_shapes:
+            items = complementary_groups[shape]
+            if items and len(result) < max_count:
+                add(items.pop(0))
+
+    # Use any remaining budget for resource/shape diversity without replacing
+    # the representatives selected above.
+    for item in sorted(candidates, key=joint_candidate_sort_key):
+        add(item)
     return result
 
 
@@ -177,7 +225,8 @@ def tiling_plan_for_ir(candidate: dict[str, Any]) -> dict[str, Any]:
         "sm_coverage", "last_wave_utilization", "arithmetic_intensity_flop_per_byte",
         "architecture_score",
     )
-    return {key: candidate[key] for key in keys}
+    return {**{key: candidate[key] for key in keys},
+            "buffer_feasibility": candidate.get("buffer_feasibility", {})}
 
 
 def compact_tiling_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -189,7 +238,8 @@ def compact_tiling_candidates(candidates: list[dict[str, Any]]) -> list[dict[str
         "estimated_occupancy", "cta_count", "cta_waves", "sm_coverage",
         "last_wave_utilization", "arithmetic_intensity_flop_per_byte", "architecture_score",
     )
-    return [{key: item[key] for key in keys} for item in candidates]
+    return [{**{key: item[key] for key in keys},
+             "buffer_feasibility": item.get("buffer_feasibility", {})} for item in candidates]
 
 
 def collect_strategy_ids(value: Any) -> set[str]:
@@ -235,6 +285,27 @@ def block_representative_score(item: dict[str, Any]) -> tuple[Any, ...]:
         abs(item["threads_per_block"] - 128),
         abs(item["estimated_accumulators_per_thread"] - 32),
         joint_candidate_sort_key(item),
+    )
+
+
+def balanced_block_representative_score(item: dict[str, Any]) -> tuple[Any, ...]:
+    """Prefer a conventional register micro-tile aligned with block geometry."""
+    block_shape = item["shape_class"]
+    warp_shape = shape_class(item["WM"], item["WN"])
+    if block_shape == "square":
+        target_tm, target_tn = 4, 4
+    elif block_shape == "m_wide":
+        target_tm, target_tn = 4, 2
+    else:
+        target_tm, target_tn = 2, 4
+    return (
+        warp_shape != block_shape,
+        abs(item["TM"] - target_tm) + abs(item["TN"] - target_tn),
+        -float(item.get("architecture_score") or 0.0),
+        abs(item["threads_per_block"] - 128),
+        abs(item["estimated_accumulators_per_thread"] - 32),
+        item["estimated_registers_per_thread"],
+        item["WM"], item["WN"], item["TM"], item["TN"],
     )
 
 

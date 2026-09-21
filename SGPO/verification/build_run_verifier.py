@@ -15,6 +15,7 @@ from typing import Any
 
 from SGPO.utils.common_utils import load_json, save_json
 from SGPO.utils.execution import execution_slot, limited
+from SGPO.verification.cuda_build_options import cuda_optimization_flags
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,12 +155,12 @@ def compile_gemm(
         str(exe_path),
     ]
     command.append("--ptxas-options=-v")
-    register_limit = ir.get("compiler", {}).get("max_register_count")
-    if register_limit is not None:
-        if type(register_limit) is not int or not 16 <= register_limit <= 255:
-            return {"status": "fail", "command": command, "returncode": None,
-                    "stdout": "", "stderr": "max_register_count must be an integer between 16 and 255"}
-        command.append(f"--maxrregcount={register_limit}")
+    try:
+        optimization_flags = cuda_optimization_flags(ir)
+    except ValueError as exc:
+        return {"status": "fail", "command": command, "returncode": None,
+                "stdout": "", "stderr": str(exc)}
+    command.extend(optimization_flags)
     if build_platform == "windows" and needs_msvc_environment() and vcvars64_path and Path(vcvars64_path).exists():
         result = run_command_with_vcvars(command, Path(vcvars64_path), cwd=source_dir, timeout_seconds=timeout_seconds)
     else:
@@ -168,6 +169,8 @@ def compile_gemm(
     result["build_platform"] = build_platform
     result["requested_arch"] = requested_arch
     result["resolved_arch"] = arch
+    result['effective_optimization_flags'] = optimization_flags
+    result['nvcc_command'] = command
     return result
 
 
@@ -406,8 +409,12 @@ def aggregate_metrics(metrics_list):
         if field in {"max_abs_error", "max_rel_error"}:
             aggregate[field] = max(values)
             continue
-        aggregate[field] = statistics.mean(values)
-        aggregate[f"{field}_mean"] = statistics.mean(values)
+        mean = statistics.mean(values)
+        trimmed_values = trim_extremes(values)
+        trimmed_mean = statistics.mean(trimmed_values)
+        aggregate[field] = trimmed_mean
+        aggregate[f"{field}_mean"] = mean
+        aggregate[f"{field}_trimmed_mean"] = trimmed_mean
         aggregate[f"{field}_median"] = statistics.median(values)
         aggregate[f"{field}_std"] = statistics.pstdev(values) if len(values) > 1 else 0.0
         aggregate[f"{field}_min"] = min(values)
@@ -416,9 +423,17 @@ def aggregate_metrics(metrics_list):
             aggregate["gflops_best"] = max(values)
         if field == "latency_ms":
             aggregate["latency_ms_best"] = min(values)
-    if aggregate.get("gflops_mean") is not None and aggregate.get("cublas_gflops_mean"):
-        aggregate["relative_to_cublas"] = aggregate["gflops_mean"] / aggregate["cublas_gflops_mean"]
+    if aggregate.get("gflops_trimmed_mean") is not None and aggregate.get("cublas_gflops_trimmed_mean"):
+        aggregate["relative_to_cublas"] = (
+            aggregate["gflops_trimmed_mean"] / aggregate["cublas_gflops_trimmed_mean"]
+        )
     return aggregate
+
+
+def trim_extremes(values):
+    """Drop one minimum and maximum when enough repeated measurements exist."""
+    ordered = sorted(values)
+    return ordered[1:-1] if len(ordered) >= 5 else ordered
 
 
 def numeric_metric_values(metrics_list, field):
@@ -508,6 +523,8 @@ def update_compile_result(ir, compile_result):
     compile_node["resolved_arch"] = compile_result.get("resolved_arch")
     compile_node["error_message"] = None if compile_result["status"] == "pass" else truncate(output_text)
     compile_node["command"] = compile_result["command"]
+    compile_node['nvcc_command'] = compile_result.get('nvcc_command')
+    compile_node['effective_optimization_flags'] = compile_result.get('effective_optimization_flags')
     compile_node["returncode"] = compile_result["returncode"]
     compile_node["vcvars64_path"] = compile_result.get("vcvars64_path")
     compile_node["timeout_recovered_by_executable"] = compile_result.get("timeout_recovered_by_executable", False)
@@ -533,8 +550,15 @@ def mark_unrun(ir, reason):
     correctness["error_message"] = reason
     runtime_safety["status"] = "not_run"
     runtime_safety["cuda_error"] = None
+    for key in ("host_error", "returncode"):
+        runtime_safety.pop(key, None)
+    for key in ("illegal_memory_access", "misaligned_address", "out_of_bounds"):
+        runtime_safety[key] = False
 
     performance = ir.setdefault("performance", {})
+    for key in list(performance):
+        if any(token in key for token in ("latency", "gflops", "benchmark", "warmup", "relative_to")):
+            performance.pop(key, None)
     performance["latency_ms"] = None
     performance["gflops"] = None
 
@@ -582,21 +606,25 @@ def update_run_result(ir, run_result):
     performance["relative_to_cublas"] = metrics.get("relative_to_cublas")
     for key in [
         "latency_ms_mean",
+        "latency_ms_trimmed_mean",
         "latency_ms_median",
         "latency_ms_std",
         "latency_ms_best",
         "latency_ms_min",
         "latency_ms_max",
         "gflops_mean",
+        "gflops_trimmed_mean",
         "gflops_median",
         "gflops_std",
         "gflops_best",
         "gflops_min",
         "gflops_max",
         "cublas_latency_ms_mean",
+        "cublas_latency_ms_trimmed_mean",
         "cublas_latency_ms_median",
         "cublas_latency_ms_std",
         "cublas_gflops_mean",
+        "cublas_gflops_trimmed_mean",
         "cublas_gflops_median",
         "cublas_gflops_std",
         "benchmark_runs",

@@ -6,7 +6,7 @@ Generate a local code patch for exactly one selected optimization strategy.
 Rules:
 1. Only modify code inside existing skeleton anchor regions such as LAUNCH_CONFIG_BEGIN/END, SHARED_DECL_BEGIN/END, INDEX_MAPPING_BEGIN/END, REGISTER_DECL_BEGIN/END, GLOBAL_TO_SHARED_LOAD_BEGIN/END, SYNC_AFTER_LOAD_BEGIN/END, MAIN_LOOP_BEGIN/END, COMPUTE_INNER_BEGIN/END, and STORE_BEGIN/END.
 2. Do not rewrite the full CUDA file.
-2a. CODE_CONTEXT is intentionally scoped to relevant anchor regions only. Do not request or assume access to complete source files.
+2a. CODE_CONTEXT contains the complete current parent kernel, not the initial skeleton. Determine all coupled regions to modify by inspecting declarations, mappings, loads, compute, synchronization and stores globally. Suggested regions are hints, not a limit.
 2b. Prefer at most 2 modified regions unless the selected strategy or repair context truly requires more.
 3. Preserve the public cuda_gemm signature.
 3a. BM, BN, BK, WM, WN, WMITER, WNITER, TM, and TN values must be defined and modified only inside the LAUNCH_CONFIG region in cuda_gemm. Do not define or assign these values inside the gemm kernel body.
@@ -16,6 +16,7 @@ Rules:
 7. If the selected strategy is Layout.SharedMemory.AB.Basic, the patch must modify the SHARED_DECL region in cuda_kernel.cuh and must plan real non-comment shared-memory declarations for both A and B, for example `__shared__ float As[BK][BM];` and `__shared__ float Bs[BK][BN];`. Do not satisfy this strategy only by changing IR fields.
 8. If the selected strategy affects compute, load, store, or epilogue behavior, the patch must plan executable CUDA statements rather than placeholder comments.
 8a. When SELECTED_STRATEGY has patch_contract, change only its allowed_ir_fields and allowed_regions. All preserved_regions are read-only context, even when visible. Follow its code_requirements; do not add other optimizations implicitly.
+8b. Pipeline.CpAsync uses static staged `__shared__` A/B buffers by default. It must not introduce `extern __shared__` or dynamic launch configuration unless Memory.SharedMemory.DynamicOptIn is itself the selected strategy.
 8b. Ambiguous repeated anchors cannot be patched by name. Use unique enclosing regions, preserve every prologue/main/final phase, and do not return overlapping parent/child edits.
 9. Return a JSON object only. Do not include Markdown.
 

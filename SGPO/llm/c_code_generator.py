@@ -10,6 +10,7 @@ from typing import Any
 from SGPO.llm.openai_client import OpenAICompatibleClient
 from SGPO.llm.openai_client import extract_json_object
 from SGPO.llm.patch_generator import load_code_context
+from SGPO.llm.strategy_examples import strategy_with_examples
 from SGPO.utils.common_utils import load_config, load_json, save_json
 
 
@@ -76,7 +77,7 @@ def build_cpu_c_patch_to_code_messages(
     prompt = template.format(
         current_ir_json=json.dumps({"note": "same compact state as CURRENT_IR_AFTER_PATCH"}, ensure_ascii=False, indent=2),
         patch_ir_json=json.dumps(compact_ir, ensure_ascii=False, indent=2),
-        strategy_json=json.dumps(compact_strategy_for_prompt(strategy), ensure_ascii=False, indent=2),
+        strategy_json=json.dumps(strategy_with_examples(compact_strategy_for_prompt(strategy)), ensure_ascii=False, indent=2),
         patch_json=json.dumps(compact_patch_for_prompt(patch_payload), ensure_ascii=False, indent=2),
         code_context_json=json.dumps(compact_cpu_code_context_for_prompt(code_context), ensure_ascii=False, indent=2),
         repair_context_json=json.dumps(compact_repair_context_for_prompt(repair_context or {}), ensure_ascii=False, indent=2),
@@ -99,7 +100,9 @@ def build_cpu_c_code_messages(
     prompt = template.format(
         current_ir_json=json.dumps(compact_cpu_ir_for_prompt(ir), ensure_ascii=False, indent=2),
         patch_ir_json=json.dumps(compact_cpu_ir_for_prompt(ir), ensure_ascii=False, indent=2),
-        strategy_json=json.dumps({}, ensure_ascii=False, indent=2),
+        strategy_json=json.dumps(strategy_with_examples({"applied_strategies": [
+            {"strategy_id": sid} for sid in (ir.get("strategy", {}) or {}).get("applied_strategy_ids", [])
+        ]}), ensure_ascii=False, indent=2),
         patch_json=json.dumps({}, ensure_ascii=False, indent=2),
         code_context_json=json.dumps(compact_cpu_code_context_for_prompt(code_context), ensure_ascii=False, indent=2),
         repair_context_json=json.dumps({}, ensure_ascii=False, indent=2),
@@ -261,6 +264,8 @@ def compact_strategy_for_prompt(strategy: dict[str, Any]) -> dict[str, Any]:
         "postconditions",
         "ir_updates",
         "implementation_contract",
+        "implementation_example_ids",
+        "applied_strategies",
         "resource_effects",
         "risk_level",
     ]

@@ -1,0 +1,26 @@
+Repair the complete CUDA kernel after unsuccessful local repair. Return JSON only.
+Return strategy_id="Repair.PreserveAppliedStrategies" and files=[an object with
+path="cuda_kernel.cuh", content=the complete repaired source, change_summary=a short explanation].
+Do not return edits or other files, change main/kernel.h, IR, precision, test tolerances,
+selected strategies, tile parameters, or the public cuda_gemm API.
+All selected optimizations MUST remain implemented. Variable names and broken code
+structure are not locked. Repair helper functions and declarations outside anchors too.
+Preserve existing anchor markers for subsequent optimization, exactly once each.
+Check A row-major float4 loads along K and their transposed shared scatter along K;
+repair BOTH initial and subsequent loads, alignment, tails and coverage together.
+Keep double-buffer storage, correct buffer-index switching, producer/consumer barriers,
+and exactly-once K reduction including the final tile. Never assign C arrays to arrays.
+Resolve declarations across the ENTIRE function scope, not just inside anchors.
+Do not substitute a scalar baseline or call a GEMM library to pass verification.
+Prior repair validation and rollback feedback describe failed attempts, not valid examples.
+
+LOCKED_STRATEGY_CONTRACT:
+{strategy_json}
+CURRENT_IR_SUMMARY:
+{patch_ir_json}
+REPAIR_REQUEST:
+{patch_json}
+COMPLETE_CUDA_CONTEXT:
+{code_context_json}
+DIAGNOSIS_AND_HISTORY:
+{repair_context_json}

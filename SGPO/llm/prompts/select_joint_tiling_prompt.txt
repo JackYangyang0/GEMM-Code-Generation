@@ -10,8 +10,12 @@ Hard facts:
 - Choose BlockTile, WarpTile, and ThreadTile jointly; do not choose them independently.
 - Preserve shape and resource diversity. Do not select two candidates with identical BM, BN, and BK.
 - Use architecture_score, estimated_occupancy, sm_coverage, cta_waves, and
-  last_wave_utilization as target-device priors. Avoid low-SM-coverage tiles,
-  especially for small matrices on GPUs with many SMs.
+  last_wave_utilization as priors, not a single objective. More CTAs can reduce
+  data reuse and increase repeated loads; low coverage alone is not a rejection.
+- Compare thread-fragment reuse: TM+TN shared elements support TM*TN FMAs per
+  outer-product fragment. Balance larger fragments against register pressure.
+  When legal alternatives exist, consider different ThreadTile sizes across
+  the selected Block tuples rather than defaulting every candidate to 2x2.
 - Do not use historical benchmark results. Do not generate source code.
 
 Problem and hardware summary:

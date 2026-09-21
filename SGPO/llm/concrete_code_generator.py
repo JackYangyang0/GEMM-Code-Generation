@@ -48,6 +48,10 @@ def generate_code_files_from_patch_with_llm(
     repair_context: dict[str, Any] | None = None,
     patch_file: Path | None = None,
 ) -> dict[str, Any]:
+    from SGPO.verification.compiler_hint_transform import HINTS
+    if strategy.get('strategy_id') in HINTS:
+        return {'strategy_id': strategy['strategy_id'], 'generation_method': 'narrow_compiler_hint',
+                'files': [], 'edits': [], 'code_generation_notes': ['No LLM source generation for compiler hints.']}
     messages = build_patch_to_code_messages(
         patch_ir=patch_ir,
         patch_result=patch_result,
@@ -57,6 +61,9 @@ def generate_code_files_from_patch_with_llm(
         repair_context=repair_context,
         patch_file=patch_file,
     )
+    if strategy.get('strategy_id', '').startswith('Pipeline.'):
+        from SGPO.verification.pipeline_evidence import PIPELINE_OBLIGATIONS
+        messages.append({'role': 'user', 'content': 'Pipeline implementation requirements:\n' + '\n'.join(PIPELINE_OBLIGATIONS)})
     response = complete_codegen_json(client, messages)
     return validate_generated_code_files_response(response, strategy["strategy_id"], patch_file)
 
@@ -92,13 +99,14 @@ def build_patch_to_code_messages(
     repair_context: dict[str, Any] | None = None,
     patch_file: Path | None = None,
 ) -> list[dict[str, str]]:
+    from SGPO.llm.strategy_examples import strategy_with_examples
     template = prompt_path.read_text(encoding="utf-8")
     patch_payload = dict(patch_result)
     if patch_file is not None:
         patch_payload["source_patch_file"] = str(patch_file)
     prompt = template.format(
         patch_ir_json=json.dumps(compact_patch_ir_for_prompt(patch_ir), ensure_ascii=False, indent=2),
-        strategy_json=json.dumps(strategy, ensure_ascii=False, indent=2),
+        strategy_json=json.dumps(strategy_with_examples(strategy), ensure_ascii=False, indent=2),
         patch_json=json.dumps(patch_payload, ensure_ascii=False, indent=2),
         code_context_json=json.dumps(code_context, ensure_ascii=False, indent=2),
         repair_context_json=json.dumps(repair_context or {}, ensure_ascii=False, indent=2),
@@ -106,7 +114,7 @@ def build_patch_to_code_messages(
     return [
         {
             "role": "system",
-            "content": "You apply SGPO Patch JSON as local CUDA anchor-region edits and only return compact valid JSON.",
+            "content": "Follow the requested CUDA output contract. Return valid JSON only. Full source is permitted only when explicitly requested for locked kernel repair.",
         },
         {"role": "user", "content": prompt},
     ]
@@ -243,6 +251,21 @@ def apply_generated_code_files(
     patch_ir: dict[str, Any] | None = None,
     strategy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from SGPO.verification.compiler_hint_transform import HINTS, apply_compiler_hint
+    sid = (strategy or {}).get('strategy_id', generated_code.get('strategy_id'))
+    if sid in HINTS:
+        path = Path(code_root) / 'cuda_kernel.cuh'
+        try:
+            original = path.read_text(encoding='utf-8')
+            content = apply_compiler_hint(original, sid)
+            path.write_text(content, encoding='utf-8')
+            generated_code.update(generation_method='narrow_compiler_hint', edits=[],
+                                  files=[{'path': 'cuda_kernel.cuh', 'content': content}])
+            return {'status': 'pass', 'method': 'narrow_compiler_hint',
+                    'applied': [{'file': 'cuda_kernel.cuh', 'changed': content != original}],
+                    'materialization': {'status': 'pass'}}
+        except (ValueError, OSError) as exc:
+            return {'status': 'fail', 'applied': [], 'error_message': str(exc)}
     if generated_code.get("edits"):
         return apply_generated_region_edits(generated_code, code_root, patch_ir or {}, strategy or {})
 
@@ -251,17 +274,15 @@ def apply_generated_code_files(
                 "error_message": "This strategy requires local region edits; full source files are forbidden"}
 
     ensure_generated_code_has_minimal_kernel(generated_code)
-    for relative_path, content in staged_content.items():
-        if relative_path != "cuda_kernel.cuh":
-            continue
-        original = original_content[relative_path]
-        if anchor_region(original, "SHARED_DECL") != anchor_region(content, "SHARED_DECL"):
-            edited = {item["region"] for item in generated_code.get("edits", []) if item["path"] == relative_path}
-            if "GLOBAL_TO_SHARED_LOAD" not in edited or "MAIN_LOOP" not in edited:
-                return {"status": "fail", "applied": [], "error_message":
-                        "Shared layout changes require GLOBAL_TO_SHARED_LOAD and MAIN_LOOP edits together; "
-                        "MAIN_LOOP must update NEXT_TILE_LOAD, all compute reads and final-tile reduction. "
-                        "Do not submit overlapping MAIN_LOOP and child-region edits."}
+    from SGPO.verification.optimization_preservation import preservation_defects
+    for item in generated_code.get("files", []):
+        if item.get("path") == "cuda_kernel.cuh":
+            path = code_root / "cuda_kernel.cuh"
+            if path.exists():
+                defects = preservation_defects(path.read_text(encoding="utf-8"), item["content"], strategy or {})
+                if defects:
+                    return {"status": "fail", "applied": [], "defects": defects,
+                            "error_message": "Patch removes existing optimizations: " + "; ".join(defects)}
     from SGPO.verification.cuda_launch_config import configure_shared_launch
     try:
         for item in generated_code.get("files", []):
@@ -311,6 +332,10 @@ def apply_generated_region_edits(
     patch_ir: dict[str, Any],
     strategy: dict[str, Any],
 ) -> dict[str, Any]:
+    try:
+        generated_code['edits'] = compose_nested_region_edits(generated_code.get('edits', []), code_root)
+    except ValueError as exc:
+        return {'status': 'fail', 'applied': [], 'error_message': str(exc)}
     applied = []
     staged_content: dict[str, str] = {}
     original_content: dict[str, str] = {}
@@ -331,16 +356,15 @@ def apply_generated_region_edits(
         if content is None:
             content = path.read_text(encoding="utf-8")
             original_content[relative_path] = content
-        if contract:
-            original = original_content[relative_path]
-            start = original.find(f"{item['region']}_BEGIN")
-            end = original.find(f"{item['region']}_END", start)
-            if start < 0 or end < 0:
-                return {"status": "fail", "applied": [], "error_message": f"Missing original anchor {item['region']}"}
-            spans = edited_spans.setdefault(relative_path, [])
-            if any(start <= previous_end and previous_start <= end for previous_start, previous_end in spans):
-                return {"status": "fail", "applied": [], "error_message": "Overlapping parent/child region edits are forbidden"}
-            spans.append((start, end))
+        original = original_content[relative_path]
+        start = original.find(f"{item['region']}_BEGIN")
+        end = original.find(f"{item['region']}_END", start)
+        if start < 0 or end < 0:
+            return {"status": "fail", "applied": [], "error_message": f"Missing original anchor {item['region']}"}
+        spans = edited_spans.setdefault(relative_path, [])
+        if any(start <= previous_end and previous_start <= end for previous_start, previous_end in spans):
+            return {"status": "fail", "applied": [], "error_message": "Overlapping parent/child region edits are forbidden"}
+        spans.append((start, end))
         try:
             content = replace_cuda_anchor_region(content, item["region"], item["replacement"])
         except Exception as exc:
@@ -371,6 +395,14 @@ def apply_generated_region_edits(
         ensure_generated_code_has_minimal_kernel(validation_payload)
     for item in validation_payload["files"]:
         staged_content[item["path"]] = item["content"]
+    from SGPO.verification.optimization_preservation import preservation_defects
+    for relative_path, content in staged_content.items():
+        if relative_path != "cuda_kernel.cuh":
+            continue
+        defects = preservation_defects(original_content[relative_path], content, strategy)
+        if defects:
+            return {"status": "fail", "applied": [], "defects": defects,
+                    "error_message": "Patch removes existing optimizations: " + "; ".join(defects)}
     if contract:
         for relative_path, content in staged_content.items():
             original = original_content[relative_path]
@@ -383,9 +415,10 @@ def apply_generated_region_edits(
             for marker in re.findall(r"\b[A-Z_]+_(?:BEGIN|END)\b", content):
                 if content.count(marker) > max(1, original.count(marker)):
                     return {"status": "fail", "applied": [], "error_message": f"Patch introduced duplicate anchor {marker}"}
-            if after.count("__shared__") != before.count("__shared__"):
+            is_locked_repair = strategy.get("strategy_id") == "Repair.PreserveAppliedStrategies"
+            if not is_locked_repair and after.count("__shared__") != before.count("__shared__"):
                 return {"status": "fail", "applied": [], "error_message": "Strategy cannot add or remove shared buffers"}
-            if re.search(r"\b(?:float4|FLOAT4)\b", after) and not re.search(r"\b(?:float4|FLOAT4)\b", before):
+            if not is_locked_repair and re.search(r"\b(?:float4|FLOAT4)\b", after) and not re.search(r"\b(?:float4|FLOAT4)\b", before):
                 return {"status": "fail", "applied": [], "error_message": "Strategy cannot introduce float4 vectorization"}
     from SGPO.verification.cuda_launch_config import configure_shared_launch
     try:
@@ -445,38 +478,51 @@ def normalize_region_name(region: Any) -> str:
     return text
 
 
+def compose_nested_region_edits(edits, code_root):
+    """Compose children inside a parent's retained anchors, never guess precedence."""
+    import copy
+    edits = copy.deepcopy(edits)
+    spans = []
+    for item in edits:
+        source = (code_root / item['path']).read_text(encoding='utf-8') if item['path'] == 'cuda_kernel.cuh' else ''
+        start = source.find(item['region'] + '_BEGIN')
+        end = source.find(item['region'] + '_END', start)
+        spans.append((start, end))
+    removed = set()
+    for child in sorted(range(len(edits)), key=lambda i: spans[i][1]-spans[i][0]):
+        a, b = spans[child]
+        if a < 0 or b < 0:
+            continue
+        parents = [i for i, (x,y) in enumerate(spans) if i != child
+                   and edits[i]['path'] == edits[child]['path'] and x < a and b < y]
+        if not parents:
+            continue
+        parent = min(parents, key=lambda i: spans[i][1]-spans[i][0])
+        body = edits[parent]['replacement']
+        region = edits[child]['region']
+        if region+'_BEGIN' not in body or region+'_END' not in body:
+            raise ValueError(f'Cannot compose {region}: parent replacement must retain its child anchors; return one complete parent edit instead')
+        edits[parent]['replacement'] = replace_cuda_anchor_region(body, region, edits[child]['replacement'])
+        removed.add(child)
+    return [item for i,item in enumerate(edits) if i not in removed]
+
+
 def replace_cuda_anchor_region(content: str, region: str, replacement: str) -> str:
-    lines = content.splitlines()
-    begin_marker = f"{region}_BEGIN"
-    end_marker = f"{region}_END"
-    if sum(begin_marker in line for line in lines) > 1 or sum(end_marker in line for line in lines) > 1:
-        raise ValueError(f"ambiguous duplicate anchor: {region}; edit a unique enclosing region covering all occurrences")
-    begin_index = next((i for i, line in enumerate(lines) if begin_marker in line), None)
-    end_index = next((i for i, line in enumerate(lines) if end_marker in line and begin_index is not None and i > begin_index), None)
-    if begin_index is None or end_index is None:
-        raise ValueError(f"anchor region not found: {region}")
-
-    body_start = begin_index + 1
-    while body_start < end_index and "*/" not in lines[body_start]:
-        body_start += 1
-    if body_start < end_index and "*/" in lines[body_start]:
-        body_start += 1
-
-    end_open_index = find_region_end_open(lines, body_start, end_index)
-    body_end = end_open_index if end_open_index is not None else end_index
-
-    indent = ""
-    if body_start < len(lines):
-        match = re.match(r"^(\s*)", lines[body_start])
-        indent = match.group(1) if match else ""
-    replacement_lines = replacement.strip("\n").splitlines()
-    indented = [f"{indent}{line}" if line else "" for line in replacement_lines]
-    suffix = lines[body_end:]
-    if end_open_index is None:
-        suffix = [f"{indent}/*"] + suffix
-    updated = lines[:body_start] + indented + suffix
-    trailing = "\n" if content.endswith(("\n", "\r\n")) else ""
-    return "\n".join(updated) + trailing
+    # Locate the entire marker comment, not a later closing comment in the body.
+    comments = list(re.finditer(r"/\*[\s\S]*?\*/|//[^\n]*", content))
+    boundaries = []
+    for suffix in ("BEGIN", "END"):
+        marker = rf"\b{re.escape(region)}_{suffix}\b"
+        matches = [m for m in comments if re.search(marker, m.group())]
+        if len(matches) != 1:
+            raise ValueError(f"Missing or ambiguous anchor: {region}_{suffix}")
+        boundaries.append(matches[0])
+    begin, end = boundaries
+    if begin.end() > end.start():
+        raise ValueError(f"Invalid anchor ordering: {region}")
+    if re.search(rf"\b{re.escape(region)}_(?:BEGIN|END)\b", replacement):
+        raise ValueError(f"Replacement must not repeat its own anchor: {region}")
+    return content[:begin.end()] + "\n" + replacement.strip("\r\n") + "\n" + content[end.start():]
 
 
 def find_region_end_open(lines: list[str], body_start: int, end_index: int) -> int | None:
@@ -551,7 +597,18 @@ def validate_generated_code_materialization(
 
     failures = []
     strategy_id = strategy.get("strategy_id") or generated_code.get("strategy_id") or ""
+    selected_strategy_ids = set(strategy.get("bundle_strategy_ids", []) or [strategy_id])
     code_only = strip_cpp_comments(kernel)
+
+    uses_cp_async = strategy_id.startswith("Pipeline.CpAsync.") or any(
+        item.startswith("Pipeline.CpAsync.") for item in selected_strategy_ids
+    )
+    uses_dynamic_shared = "Memory.SharedMemory.DynamicOptIn" in selected_strategy_ids
+    if uses_cp_async and not uses_dynamic_shared and re.search(r"\bextern\s+__shared__\b", code_only):
+        failures.append(
+            "cp.async must use static staged __shared__ A/B buffers; extern __shared__ is reserved "
+            "for an explicitly selected Memory.SharedMemory.DynamicOptIn strategy."
+        )
 
     for region in generated_code_modified_regions(generated_code, patch_ir):
         region_name = region_anchor_name(region)
@@ -574,8 +631,23 @@ def validate_generated_code_materialization(
         shared_decls = re.findall(r"__shared__\s+float\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[", code_only)
         has_a = any(name.lower().startswith(("as", "shared_a", "sa")) for name in shared_decls)
         has_b = any(name.lower().startswith(("bs", "shared_b", "sb")) for name in shared_decls)
-        if not (has_a and has_b):
+        dynamic_storage = bool(re.search(r"\bextern\s+__shared__\s+float\s+[A-Za-z_][A-Za-z0-9_]*\s*\[\s*\]", code_only))
+        dynamic_a = bool(re.search(r"\bfloat\s*(?:\*+\s*(?:As|shared_A|sa)\b|\(\s*\*\s*(?:As|shared_A|sa)\s*\))", code_only, re.IGNORECASE))
+        dynamic_b = bool(re.search(r"\bfloat\s*(?:\*+\s*(?:Bs|shared_B|sb)\b|\(\s*\*\s*(?:Bs|shared_B|sb)\s*\))", code_only, re.IGNORECASE))
+        valid_explicit_dynamic = uses_dynamic_shared and dynamic_storage and dynamic_a and dynamic_b
+        if not ((has_a and has_b) or valid_explicit_dynamic):
             failures.append("Shared-memory strategy requires real __shared__ float A/B buffers.")
+        cp_async_ids = [item for item in selected_strategy_ids if item.startswith("Pipeline.CpAsync.Multistage")]
+        if uses_cp_async and not uses_dynamic_shared and cp_async_ids:
+            stage_match = re.search(r"Multistage([234])", cp_async_ids[0])
+            stage_count = int(stage_match.group(1)) if stage_match else 0
+            static_a = static_shared_first_extent(code_only, ("As", "shared_A", "sa"))
+            static_b = static_shared_first_extent(code_only, ("Bs", "shared_B", "sb"))
+            if stage_count and (static_a != stage_count or static_b != stage_count):
+                failures.append(
+                    f"cp.async Multistage{stage_count} requires static A/B shared buffers with first extent "
+                    f"[{stage_count}]; found A={static_a}, B={static_b}."
+                )
 
     if compute_strategy(strategy_id) and not (
         re.search(r"\+=\s*[^;]*\*\s*[^;]*;", code_only)
@@ -597,6 +669,16 @@ def validate_generated_code_materialization(
 
 def pass_materialization(message: str) -> dict[str, Any]:
     return {"status": "pass", "message": message, "failures": []}
+
+
+def static_shared_first_extent(code: str, names: tuple[str, ...]) -> int | None:
+    alternatives = "|".join(re.escape(name) for name in names)
+    match = re.search(
+        rf"\b__shared__\s+float\s+(?:{alternatives})\s*\[\s*(\d+)\s*\]",
+        code,
+        re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else None
 
 
 def generated_file_content(generated_code: dict[str, Any], relative_path: str) -> str | None:

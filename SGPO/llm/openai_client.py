@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from SGPO.llm.base import LLMClient
+from SGPO.llm.provider_config import resolve_provider_config
 from SGPO.utils.execution import limited
 from openai import OpenAI
 
@@ -32,11 +33,13 @@ class LLMConfig:
 
 class OpenAICompatibleClient(LLMClient):
     def __init__(self, config):
+        config = resolve_provider_config(config)
         api_key = resolve_api_key(config)
         if not api_key:
             env_name = config.get("api_key_env") or "configured environment variable"
             raise RuntimeError(
-                f"Missing API key. Set llm.api_key in conf.yaml or environment variable {env_name}."
+                f"Missing API key for {config.get('provider', 'configured provider')}. "
+                f"Set api_key/api_key_env in the selected llm provider configuration or environment variable {env_name}."
             )
 
         self._config = config
@@ -107,6 +110,15 @@ class OpenAICompatibleClient(LLMClient):
         content = response.choices[0].message.content or "{}"
         logger.info("LLM response received: %d chars", len(content))
         return extract_json_object(content)
+
+    @limited("llm")
+    def complete_tile_plan_text(self, messages):
+        """Expose raw JSON-mode responses for local planning diagnostics."""
+        response = self._client.chat.completions.create(**self._completion_kwargs(
+            messages, self._timeout_seconds, min(self._max_tokens, 4096),
+            json_mode=True, thinking_mode=self._selection_thinking_mode,
+        ))
+        return response.choices[0].message.content or ""
 
     @limited("llm")
     def complete_selection_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:

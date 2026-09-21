@@ -774,7 +774,7 @@
       },
       {
         "required_state": {
-          "problem.K": ">=2048",
+          "problem.K": ">=1",
           "tiling.block_k": "not null"
         }
       }

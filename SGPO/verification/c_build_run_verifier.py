@@ -450,12 +450,14 @@ def update_cpu_run_result(ir: dict[str, Any], run_result: dict[str, Any]) -> Non
     performance["gflops"] = metrics.get("gflops")
     for key in [
         "latency_ms_mean",
+        "latency_ms_trimmed_mean",
         "latency_ms_median",
         "latency_ms_std",
         "latency_ms_best",
         "latency_ms_min",
         "latency_ms_max",
         "gflops_mean",
+        "gflops_trimmed_mean",
         "gflops_median",
         "gflops_std",
         "gflops_best",

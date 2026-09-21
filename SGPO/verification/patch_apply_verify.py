@@ -207,7 +207,15 @@ def update_patch_application(ir: dict[str, Any], apply_result: dict[str, Any]) -
 
 
 def mark_patch_apply_failed(ir: dict[str, Any], apply_result: dict[str, Any]) -> dict[str, Any]:
+    ir["chain_step"] = {
+        "status": "failed",
+        "phase": "patch_application",
+        "reason": apply_result.get("error_message") or "patch application failed",
+        "candidate_code_dir": apply_result.get("candidate_code_dir"),
+        "retryable": True,
+    }
     verification = ir.setdefault("verification", {})
+    verification["accepted"] = False
     verification["compile"] = {
         "status": "not_run",
         "error_message": "patch application failed",
@@ -228,6 +236,14 @@ def mark_patch_apply_failed(ir: dict[str, Any], apply_result: dict[str, Any]) ->
         "gflops": None,
         "patch_apply_status": apply_result["status"],
         "patch_apply_error": apply_result.get("error_message"),
+        "chain_step_status": "failed",
+        "failure_phase": "patch_application",
+        "retryable": True,
+    }
+    ir["code_completeness"] = {
+        "accepted": False,
+        "results": [],
+        "reason": "patch application failed before source materialization",
     }
     performance = ir.setdefault("performance", {})
     performance["latency_ms"] = None
